@@ -1,5 +1,5 @@
 <div align="center">
-  <a href="https://waifu.im">
+  <a href="https://waifu-api-eosin.vercel.app">
     <img src="https://cdn.waifu.im/7892.jpg" alt="Waifu.im Logo" width="200" style="border-radius: 20px; box-shadow: 0 8px 30px rgba(0,0,0,0.12);">
   </a>
 
@@ -11,17 +11,37 @@
   </p>
 
   <p>
-    <a href="https://waifu.im"><strong>Website</strong></a> •
-    <a href="https://docs.waifu.im"><strong>Documentation</strong></a> •
-    <a href="https://waifu.im/contact/"><strong>Support</strong></a>
+    <a href="https://waifu-api-eosin.vercel.app"><strong>Website</strong></a> •
+    <a href="https://waifu-api-docs.vercel.app"><strong>Documentation</strong></a> •
+    <a href="https://discord.gg/qceZ92p2xK"><strong>Support</strong></a>
   </p>
 
   <p>
+    <img src="https://img.shields.io/badge/instance-live-22c55e?style=flat-square" alt="Instance status">
     <img src="https://img.shields.io/github/license/waifu-im/waifu-api?style=flat-square&color=5865F2" alt="License">
-    <img src="https://img.shields.io/github/stars/waifu-im/waifu-api?style=flat-square&color=5865F2" alt="Stars">
     <img src="https://img.shields.io/badge/Docker-Ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
   </p>
 </div>
+
+> **This is a community-run fork.** The original project by
+> [Buco7854](https://github.com/Waifu-im/waifu-api) is being migrated off its
+> original infrastructure. The API contract is unchanged, so existing
+> integrations keep working — but the endpoints moved, and some features are
+> unavailable while the migration is in progress.
+
+## 🚧 Instance status
+
+| | |
+|---|---|
+| API | `https://waifu-api-031n.onrender.com` |
+| Website | `https://waifu-api-eosin.vercel.app` |
+| Documentation | `https://waifu-api-docs.vercel.app` |
+| Uploads | Disabled until moderation is sorted out |
+| Users | Discord OAuth works; existing accounts did not carry over |
+
+Image URLs are served through a Cloudflare Worker in front of a private object
+store, so `Cdn__BaseUrl` points at the Worker rather than at storage directly.
+Response shapes are unchanged.
 
 ## ✨ Features
 
@@ -47,7 +67,9 @@ Waifu.im provides a robust REST API designed for ease of use and flexibility.
 
 ## 🚀 Getting Started
 
-Deploy your own instance of the Waifu.im API using Docker.
+Deploy your own instance of the Waifu.im API using Docker. See
+[`scripts/mirror/`](scripts/mirror/) for tooling that imports a database export
+and mirrors an image archive into any S3-compatible bucket.
 
 ### Prerequisites
 
