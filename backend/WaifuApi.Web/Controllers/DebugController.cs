@@ -26,9 +26,9 @@ public class DebugController : ControllerBase
     [HttpGet("conn")]
     public async Task<IActionResult> GetConnection()
     {
-        var raw = _configuration.GetConnectionString("DefaultConnection");
+        var value = _configuration.GetConnectionString("DefaultConnection");
 
-        if (string.IsNullOrEmpty(raw))
+        if (string.IsNullOrEmpty(value))
         {
             return Ok(new
             {
@@ -39,18 +39,18 @@ public class DebugController : ControllerBase
         }
 
         // Describe the value without exposing the secret.
-        var firstChar = raw.Length > 0 ? raw[0] : '\0';
+        var firstChar = value.Length > 0 ? value[0] : '\0';
         var report = new Dictionary<string, object?>
         {
             ["present"] = true,
-            ["length"] = raw.Length,
+            ["length"] = value.Length,
             ["firstCharCode"] = (int)firstChar,
-            ["startsWithPostgres"] = raw.StartsWith("postgresql://", StringComparison.Ordinal),
-            ["startsWithHttp"] = raw.StartsWith("http", StringComparison.OrdinalIgnoreCase),
+            ["startsWithPostgres"] = value.StartsWith("postgresql://", StringComparison.Ordinal),
+            ["startsWithHttp"] = value.StartsWith("http", StringComparison.OrdinalIgnoreCase),
             ["hasLeadingSpace"] = char.IsWhiteSpace(firstChar),
-            ["hasTrailingSpace"] = char.IsWhiteSpace(raw[^1]),
-            ["semicolonCount"] = raw.Count(c => c == ';'),
-            ["atCount"] = raw.Count(c => c == '@'),
+            ["hasTrailingSpace"] = char.IsWhiteSpace(value[^1]),
+            ["semicolonCount"] = value.Count(c => c == ';'),
+            ["atCount"] = value.Count(c => c == '@'),
             ["keyCount"] = _configuration.AsEnumerable()
                 .Count(kv => kv.Key.Contains("DefaultConnection", StringComparison.OrdinalIgnoreCase)),
             ["matchingKeys"] = _configuration.AsEnumerable()
