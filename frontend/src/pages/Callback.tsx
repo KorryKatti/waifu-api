@@ -1,4 +1,4 @@
-﻿import { useEffect } from 'react';
+﻿import { useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
@@ -7,10 +7,15 @@ const Callback = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { login } = useAuth();
+  // Discord codes are single-use. login() changes auth state, which re-renders
+  // this component and re-fires the effect, so the code would be spent twice.
+  const exchanged = useRef(false);
 
   useEffect(() => {
+    if (exchanged.current) return;
     const code = searchParams.get('code');
     if (code) {
+      exchanged.current = true;
       api.post('/auth/discord', { code })
         .then((response) => {
           login(response.data.token);
