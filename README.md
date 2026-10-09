@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://waifu-api-eosin.vercel.app">
-    <img src="https://cdn.waifu.im/7892.jpg" alt="Waifu.im Logo" width="200" style="border-radius: 20px; box-shadow: 0 8px 30px rgba(0,0,0,0.12);">
+    <img src="frontend/public/brand/logo.jpg" alt="Waifu.im Logo" width="200" style="border-radius: 20px; box-shadow: 0 8px 30px rgba(0,0,0,0.12);">
   </a>
 
   <h1>Waifu.im API</h1>
@@ -101,8 +101,8 @@ and mirrors an image archive into any S3-compatible bucket.
    API_BASE_PATH="/"
 
    # Frontend
-   VITE_API_URL="https://api.waifu.im"
-   VITE_DISCORD_REDIRECT_URI="https://www.waifu.im/auth/callback"
+   VITE_API_URL="https://waifu-api-031n.onrender.com"
+   VITE_DISCORD_REDIRECT_URI="https://waifu-api-eosin.vercel.app/auth/callback"
    ```
 
 3. **Launch**
@@ -146,6 +146,21 @@ For active development, we recommend running the database via Docker and the ser
    ```
    The frontend will be available at `http://localhost:5173`.
 
+### 🔌 Hosting notes
+
+The reference deployment in this fork does not run the API and its images from
+the same host. `Cdn__BaseUrl` points at a Cloudflare Worker rather than at
+storage directly:
+
+| | |
+|---|---|
+| API | Render — JSON metadata, Postgres queries |
+| Images | Cloudflare Worker — signs SigV4 to a private object store, caches at the edge |
+
+This matters if you self-host. IDrive (among others) no longer allows public
+buckets to be created, so the Worker exists to fetch from a private one. AWS S3
+or MinIO can be made public directly and don't need it.
+
 ### 👑 Setting up an Admin User
 
 To access administrative features (moderation, tag management, etc.), you need to promote your user account.
@@ -166,7 +181,17 @@ To access administrative features (moderation, tag management, etc.), you need t
 A huge thank you to our community contributors who help expand our database:
 
 - **[Ruhannn](https://github.com/Ruhannn)** - Curated the `kamisato-ayaka` tag collection.
+- **[Buco7854](https://github.com/Buco7854)** - Original author and maintainer of this project for over three years.
+
+## License
+
+[MPL-2.0](LICENSE) — file-level copyleft. Modify freely; publish any file you
+change. Forking and self-hosting is explicitly welcome.
+
+Images are third-party artist work, credited per record in the `Images.Source`
+column. This repository distributes the catalogue and the metadata, not a claim
+on the artwork.
 
 <div align="center">
-  <sub>Built with ❤️ by the Waifu.im team.</sub>
+  <sub>Built with ❤️ by the Waifu.im team and its community fork maintainers.</sub>
 </div>
