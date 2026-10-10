@@ -82,17 +82,6 @@ const Upload = () => {
 
   return (
       <div className="max-w-5xl mx-auto p-4 md:p-8">
-        {/* Uploads Paused */}
-        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 mb-4 flex items-start gap-3">
-          <Info className="text-amber-500 shrink-0 mt-0.5" size={20} />
-          <div>
-            <h4 className="font-bold text-amber-600 dark:text-amber-400 text-sm">Uploads are temporarily disabled</h4>
-            <p className="text-sm text-muted-foreground mt-1">
-              This instance is being set up and is not accepting new images yet. Check back later.
-            </p>
-          </div>
-        </div>
-
         {/* Review Notice */}
         <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4 mb-8 flex items-start gap-3">
           <Info className="text-blue-500 shrink-0 mt-0.5" size={20} />
