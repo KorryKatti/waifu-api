@@ -17,7 +17,7 @@
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/instance-live-22c55e?style=flat-square" alt="Instance status">
+    <a href="https://stats.uptimerobot.com/AbgWCVWsKT"><img src="https://img.shields.io/badge/instance-live-22c55e?style=flat-square" alt="Instance status"></a>
     <img src="https://img.shields.io/github/license/waifu-im/waifu-api?style=flat-square&color=5865F2" alt="License">
     <img src="https://img.shields.io/badge/Docker-Ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
   </p>
