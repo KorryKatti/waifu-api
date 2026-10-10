@@ -26,7 +26,13 @@ public class PingController : ControllerBase
     /// </remarks>
     /// <returns>The plain text body `pong`.</returns>
     /// <response code="200">Returns `pong`.</response>
+    /// <remarks>
+    /// Also responds to HEAD. Attribute routing does not map HEAD onto a GET action,
+    /// so without this uptime monitors that default to HEAD get a 404 from the
+    /// fallback handler.
+    /// </remarks>
     [HttpGet]
+    [HttpHead]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public ContentResult GetPing()
     {
