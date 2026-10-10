@@ -1,5 +1,5 @@
 ﻿import { Link } from 'react-router-dom';
-import { ArrowRight, Book, Wifi, WifiOff, Image as ImageIcon, Tag as TagIcon, Users, Activity, Info, MessageCircle } from 'lucide-react';
+import { ArrowRight, Book, Wifi, WifiOff, Image as ImageIcon, Tag as TagIcon, Users, Activity } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import api from '../services/api';
 import { ImageDto, PaginatedList, NsfwMode, Orientation, AnimatedMode } from '../types';
@@ -75,29 +75,6 @@ const Home = () => {
     return (
         <div className="relative flex flex-col items-center justify-start md:justify-center p-4 min-h-[calc(100vh-4rem)] pt-16 md:pt-4">
             <MetaTags />
-
-            {/* Migration Notice */}
-            <div className="relative z-10 mb-8 w-full max-w-2xl">
-                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-start gap-3 text-left backdrop-blur-md">
-                    <Info className="text-amber-500 shrink-0 mt-0.5" size={20} />
-                    <div>
-                        <h4 className="font-bold text-amber-600 dark:text-amber-400 text-sm">Migration in progress</h4>
-                        <p className="text-sm text-muted-foreground mt-1">
-                            This instance is mid-migration, so some features may be unavailable or behave
-                            differently than before. Uploads are disabled for now.
-                        </p>
-                        <a
-                            href="https://discord.gg/qceZ92p2xK"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1.5 mt-2 text-sm font-semibold text-amber-600 dark:text-amber-400 hover:underline"
-                        >
-                            <MessageCircle size={14} />
-                            Follow updates on Discord
-                        </a>
-                    </div>
-                </div>
-            </div>
 
             {/* Background Image */}
             {heroImage && (
