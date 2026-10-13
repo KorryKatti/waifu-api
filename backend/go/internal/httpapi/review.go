@@ -132,7 +132,7 @@ func (s *Server) handleListReviewTasks(w http.ResponseWriter, r *http.Request) {
 
 	query := r.URL.Query()
 
-	if raw := query.Get("status"); raw != "" {
+	if raw := queryParam(query, "status"); raw != "" {
 		status, err := parseReviewTaskStatus(raw)
 		if err != nil {
 			writeAPIError(w, r, err)
@@ -144,7 +144,7 @@ func (s *Server) handleListReviewTasks(w http.ResponseWriter, r *http.Request) {
 	// The parameter is targetType, matching GetReviewTasksRequest. An earlier
 	// port read "type", which silently ignored the filter: the review page's
 	// per-type tabs sent targetType and received the whole queue instead.
-	if raw := query.Get("targetType"); raw != "" {
+	if raw := queryParam(query, "targetType"); raw != "" {
 		targetType, err := models.ParseReviewableType(raw)
 		if err != nil {
 			writeAPIError(w, r, validationError("TargetType", err.Error()))
@@ -153,7 +153,7 @@ func (s *Server) handleListReviewTasks(w http.ResponseWriter, r *http.Request) {
 		filter.TargetType = &targetType
 	}
 
-	if raw := query.Get("kind"); raw != "" {
+	if raw := queryParam(query, "kind"); raw != "" {
 		kind, err := parseReviewTaskKind(raw)
 		if err != nil {
 			writeAPIError(w, r, err)
@@ -162,7 +162,7 @@ func (s *Server) handleListReviewTasks(w http.ResponseWriter, r *http.Request) {
 		filter.Kind = &kind
 	}
 
-	if raw := query.Get("targetId"); raw != "" {
+	if raw := queryParam(query, "targetId"); raw != "" {
 		targetID, err := parsePositiveInt64(raw)
 		if err != nil {
 			writeAPIError(w, r, validationError("TargetId", "'targetId' must be a number."))
@@ -173,7 +173,7 @@ func (s *Server) handleListReviewTasks(w http.ResponseWriter, r *http.Request) {
 
 	// Non-moderators are always scoped to their own submissions. A moderator may
 	// ask for just theirs with mine=true, which is the "my submissions" view.
-	if !caller.CanModerate() || truthy(query.Get("mine")) {
+	if !caller.CanModerate() || truthy(queryParam(query, "mine")) {
 		filter.SubmitterID = &caller.UserID
 	}
 

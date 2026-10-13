@@ -110,19 +110,19 @@ func (s *Server) catalogFilterFromRequest(r *http.Request) (repo.CatalogFilter, 
 	query := r.URL.Query()
 	var filter repo.CatalogFilter
 
-	filter.Name = query.Get("name")
+	filter.Name = queryParam(query, "name")
 	filter.IncludedIDs = parseIntList(r, "includedIds")
 	if slugs := stringListParam(query, "includedSlugs"); len(slugs) > 0 {
 		filter.IncludedSlugs = slugs
 	}
-	filter.IncludeMine = truthy(query.Get("includeMyPending"))
+	filter.IncludeMine = truthy(queryParam(query, "includeMyPending"))
 
 	if caller := s.principal(r); caller != nil {
 		filter.ViewerID = caller.UserID
 	}
 
 	filter.ReviewStatus = models.FilterAccepted
-	if raw := query.Get("reviewStatus"); raw != "" {
+	if raw := queryParam(query, "reviewStatus"); raw != "" {
 		status, err := models.ParseReviewStatusFilter(raw)
 		if err != nil {
 			return filter, apierror.BadRequest(err.Error())

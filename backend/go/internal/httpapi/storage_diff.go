@@ -81,7 +81,7 @@ func (s *Server) handleStorageDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mode, err := parseDiffMode(r.URL.Query().Get("mode"))
+	mode, err := parseDiffMode(queryParam(r.URL.Query(), "mode"))
 	if err != nil {
 		writeAPIError(w, r, err)
 		return

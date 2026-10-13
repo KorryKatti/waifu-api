@@ -161,7 +161,7 @@ func (s *Server) handleListReports(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	filter := repo.ReportFilter{Page: page.Page, PageSize: page.PageSize}
 
-	if raw := query.Get("status"); raw != "" {
+	if raw := queryParam(query, "status"); raw != "" {
 		status, ok := models.ParseReportStatus(raw)
 		if !ok {
 			writeAPIError(w, r, validationError("Status",
@@ -173,7 +173,7 @@ func (s *Server) handleListReports(w http.ResponseWriter, r *http.Request) {
 
 	// Ordinary users are always scoped to their own reports. A moderator may ask
 	// for just their own with mine=true, which is the "My Reports" view.
-	mine := truthy(query.Get("mine"))
+	mine := truthy(queryParam(query, "mine"))
 	if !caller.CanModerate() || mine {
 		filter.UserID = &caller.UserID
 	}
@@ -467,12 +467,12 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := r.URL.Query()
-	search := strings.TrimSpace(query.Get("name"))
+	search := strings.TrimSpace(queryParam(query, "name"))
 
 	// includedIds narrows to exact users, which is how the filter sidebar's user
 	// picker resolves a numeric selection.
 	var includedIDs []int64
-	if raw := query.Get("includedIds"); raw != "" {
+	if raw := queryParam(query, "includedIds"); raw != "" {
 		includedIDs = parseIntList(r, "includedIds")
 	}
 

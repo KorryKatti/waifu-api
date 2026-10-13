@@ -51,6 +51,31 @@ func (p pageParams) offset() int {
 // pageNumber returns the one-based page number for the envelope.
 func (p pageParams) pageNumber() int { return p.Page + 1 }
 
+// queryParam reads a query string parameter, matching its name case-insensitively.
+//
+// The C# service bound [FromQuery] models, and ASP.NET matches those
+// case-insensitively, so PageSize, pagesize and pageSize have all worked for
+// the whole life of the API. url.Values.Get is an exact map lookup, so every
+// parameter became case-sensitive after the port: PageSize was ignored and the
+// default page size used instead, IsNsfw=True was ignored and SFW-only results
+// returned, and IncludedTags was ignored so a caller filtering to one tag
+// silently received the whole catalogue.
+//
+// Nothing here errors on an unrecognised parameter, which is why it went
+// unnoticed. A client asking for five images got one, and a client asking for
+// a specific tag got everything. Silent wrong answers, not failures.
+func queryParam(query url.Values, name string) string {
+	if value := query.Get(name); value != "" {
+		return value
+	}
+	for key, values := range query {
+		if len(values) > 0 && strings.EqualFold(key, name) {
+			return values[0]
+		}
+	}
+	return ""
+}
+
 // parsePagination reads page and pageSize from the query string and normalises
 // them the way PaginationUtils.Normalize does.
 //
@@ -64,7 +89,7 @@ func parsePagination(r *http.Request, limits config.PageSize) (pageParams, error
 	query := r.URL.Query()
 
 	page := 1
-	if raw := query.Get("page"); raw != "" {
+	if raw := queryParam(query, "page"); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil {
 			return pageParams{}, apierror.BadRequest("The value 'page' is not valid.")
@@ -73,7 +98,7 @@ func parsePagination(r *http.Request, limits config.PageSize) (pageParams, error
 	}
 
 	pageSize := limits.Default
-	if raw := query.Get("pageSize"); raw != "" {
+	if raw := queryParam(query, "pageSize"); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil {
 			return pageParams{}, apierror.BadRequest("The value 'pageSize' is not valid.")
@@ -212,10 +237,26 @@ func parseStringList(r *http.Request, name string) []string {
 // Unlike parseIntList the values are kept as strings: a tag filter accepts
 // either an id or a slug and the repository decides which, so parsing here would
 // lose information.
+// stringListParam reads a repeatable query parameter, matching its name
+// case-insensitively for the same reason queryParam does. A caller sending
+// IncludedTags had its filter silently dropped, which is the worst shape a
+// filter failure can take: the response is a valid, complete list, just not the
+// one that was asked for.
 func stringListParam(query url.Values, name string) []string {
 	var values []string
 	for _, raw := range query[name] {
 		values = append(values, splitAndTrim(raw)...)
+	}
+	if len(values) > 0 {
+		return values
+	}
+	for key, raws := range query {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		for _, raw := range raws {
+			values = append(values, splitAndTrim(raw)...)
+		}
 	}
 	return values
 }

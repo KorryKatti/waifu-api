@@ -97,16 +97,16 @@ func (s *Server) imageFilterFromRequest(r *http.Request, albumID *int64) (repo.I
 
 	filter.AlbumID = albumID
 
-	if filter.Nsfw, err = models.ParseNsfwMode(query.Get("isNsfw")); err != nil {
+	if filter.Nsfw, err = models.ParseNsfwMode(queryParam(query, "isNsfw")); err != nil {
 		return filter, apierror.BadRequest(err.Error())
 	}
-	if filter.Animated, err = models.ParseAnimatedMode(query.Get("isAnimated")); err != nil {
+	if filter.Animated, err = models.ParseAnimatedMode(queryParam(query, "isAnimated")); err != nil {
 		return filter, apierror.BadRequest(err.Error())
 	}
-	if filter.Orientation, err = models.ParseOrientation(query.Get("orientation")); err != nil {
+	if filter.Orientation, err = models.ParseOrientation(queryParam(query, "orientation")); err != nil {
 		return filter, apierror.BadRequest(err.Error())
 	}
-	if filter.OrderBy, err = models.ParseImageOrderBy(query.Get("orderBy")); err != nil {
+	if filter.OrderBy, err = models.ParseImageOrderBy(queryParam(query, "orderBy")); err != nil {
 		return filter, apierror.BadRequest(err.Error())
 	}
 
@@ -117,9 +117,9 @@ func (s *Server) imageFilterFromRequest(r *http.Request, albumID *int64) (repo.I
 	filter.IncludedIDs = stringListParam(query, "includedIds")
 	filter.ExcludedIDs = stringListParam(query, "excludedIds")
 
-	filter.Width = query.Get("width")
-	filter.Height = query.Get("height")
-	filter.ByteSize = query.Get("byteSize")
+	filter.Width = queryParam(query, "width")
+	filter.Height = queryParam(query, "height")
+	filter.ByteSize = queryParam(query, "byteSize")
 
 	// The caller identity is taken from the token, never from the query string.
 	// The album endpoint additionally knows which user the album belongs to, and
@@ -135,19 +135,19 @@ func (s *Server) imageFilterFromRequest(r *http.Request, albumID *int64) (repo.I
 		filter.UserID = &id
 	}
 
-	filter.IncludeMyPending = truthy(query.Get("includeMyPending"))
+	filter.IncludeMyPending = truthy(queryParam(query, "includeMyPending"))
 	filter.ChildrenReviewStatus = models.FilterAccepted
-	if raw := query.Get("childrenReviewStatus"); raw != "" {
+	if raw := queryParam(query, "childrenReviewStatus"); raw != "" {
 		if filter.ChildrenReviewStatus, err = models.ParseReviewStatusFilter(raw); err != nil {
 			return filter, apierror.BadRequest(err.Error())
 		}
 	}
-	filter.IncludeMyPendingChildren = truthy(query.Get("includeMyPendingChildren"))
+	filter.IncludeMyPendingChildren = truthy(queryParam(query, "includeMyPendingChildren"))
 
 	// Filtering by uploader or by a non-accepted review status exposes
 	// unreviewed content, so it is moderator-only. A non-moderator asking for it
 	// gets 403 rather than silently having the filter dropped.
-	if raw := query.Get("uploaderId"); raw != "" {
+	if raw := queryParam(query, "uploaderId"); raw != "" {
 		if !s.canModerate(r) {
 			return filter, &authz.ErrForbidden{
 				Action:       authz.Action("filter images by uploader"),
@@ -161,7 +161,7 @@ func (s *Server) imageFilterFromRequest(r *http.Request, albumID *int64) (repo.I
 		filter.UploaderID = &id
 	}
 
-	if raw := query.Get("reviewStatus"); raw != "" {
+	if raw := queryParam(query, "reviewStatus"); raw != "" {
 		if filter.ReviewStatus, err = models.ParseReviewStatusFilter(raw); err != nil {
 			return filter, apierror.BadRequest(err.Error())
 		}
@@ -232,7 +232,7 @@ func (s *Server) handleGetImage(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	childrenStatus := models.FilterAccepted
-	if raw := query.Get("childrenReviewStatus"); raw != "" {
+	if raw := queryParam(query, "childrenReviewStatus"); raw != "" {
 		if childrenStatus, err = models.ParseReviewStatusFilter(raw); err != nil {
 			writeAPIError(w, r, validationError("ChildrenReviewStatus", err.Error()))
 			return
@@ -247,7 +247,7 @@ func (s *Server) handleGetImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	includeMyPendingChildren := truthy(query.Get("includeMyPendingChildren"))
+	includeMyPendingChildren := truthy(queryParam(query, "includeMyPendingChildren"))
 
 	// Pending content is visible to moderators and to the uploader, which is what
 	// the C# childrenReviewStatus filter does on the read path.
