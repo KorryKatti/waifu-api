@@ -247,23 +247,23 @@ async def waifu(ctx, *, query: str = ""):
         parts.remove("nsfw")
 
     params = {
-        "IsNsfw": "True" if is_nsfw else "False",
-        "IsAnimated": "All",
-        "OrderBy": "Random",
-        "PageSize": 1,
+        "isNsfw": "True" if is_nsfw else "False",
+        "isAnimated": "All",
+        "orderBy": "Random",
+        "pageSize": 1,
     }
 
     if "gif" in parts:
         parts.remove("gif")
-        params["IsAnimated"] = "True"
+        params["isAnimated"] = "True"
 
     orientation = next((p for p in parts if p in ORIENTATIONS), None)
     if orientation:
         parts.remove(orientation)
-        params["Orientation"] = orientation.capitalize()
+        params["orientation"] = orientation.capitalize()
 
     if parts:
-        params["IncludedTags"] = "-".join(parts)
+        params["includedTags"] = "-".join(parts)
 
     async with ctx.typing():
         try:
@@ -320,10 +320,10 @@ async def gallery(ctx):
     """Show a gallery of random waifus with prev/next buttons (valid 3 min)."""
     is_nsfw = nsfw_allowed(ctx.channel)
     params = {
-        "IsNsfw": "True" if is_nsfw else "False",
-        "IsAnimated": "All",
-        "OrderBy": "Random",
-        "PageSize": 5,
+        "isNsfw": "True" if is_nsfw else "False",
+        "isAnimated": "All",
+        "orderBy": "Random",
+        "pageSize": 5,
     }
     async with ctx.typing():
         try:
