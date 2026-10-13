@@ -203,3 +203,28 @@ for everything, while `curl` worked perfectly.
 It is invisible to `routecheck` and to a 59-endpoint sweep, because a route is a
 path and a method and CORS is a **header**. A route sweep will never catch this.
 Header behaviour needs its own tests, which is what `cors_test.go` is.
+
+### The test database is more permissive than production
+
+`schema.sql` documents `DEFAULT 0` and `DEFAULT false` on columns like
+`Users.RequestCount`. **Production has no defaults on any of them** — EF Core
+created them bare, `NOT NULL` with nothing to fill in. Every Go INSERT must
+therefore supply every `NOT NULL` column explicitly; omitting one inserts NULL
+and fails at runtime.
+
+This nearly caused a silent outage. `UpsertUserByDiscordID` omitted
+`IsBlacklisted` and the three counters, so **every Discord login failed** with a
+not-null violation, while the tests passed — because the test database is built
+from `schema.sql`, which has the defaults the real database lacks. A test
+database that differs from production defeats the point of having tests.
+
+To find this class of bug, compare the live table against what the code writes,
+not against `schema.sql`. Rolled-back transactions are the check:
+
+```sql
+BEGIN;
+INSERT INTO "Users" ("DiscordId","Name") VALUES ('probe','probe') RETURNING "Id";
+ROLLBACK;
+```
+
+Fourteen production INSERTs were checked this way; only `Users` was wrong.

@@ -642,9 +642,22 @@ func (r *Repo) UpsertUserByDiscordID(ctx context.Context, discordID, name string
 	var user models.User
 	var inserted bool
 
+	// Every NOT NULL column is supplied explicitly.
+	//
+	// This is not belt-and-braces. schema.sql documents DEFAULT 0 and DEFAULT
+	// false for the counters, but production has no defaults on any Users
+	// column - EF Core created them bare - so omitting them inserts NULL and
+	// every Discord login failed with a not-null violation. The test database is
+	// built from schema.sql, so the tests were running against a schema more
+	// permissive than the real one and passed regardless.
+	//
+	// Ids are the exception: they are identity columns in production even though
+	// information_schema reports no default for them.
 	err := r.db.QueryRow(ctx, `
-        INSERT INTO "Users" ("DiscordId", "Name", "AvatarUrl", "Role")
-        VALUES ($1, $2, $3, 0)
+        INSERT INTO "Users"
+            ("DiscordId", "Name", "AvatarUrl", "Role",
+             "IsBlacklisted", "RequestCount", "JwtRequestCount", "ApiKeyRequestCount")
+        VALUES ($1, $2, $3, 0, false, 0, 0, 0)
         ON CONFLICT ("DiscordId") DO UPDATE
             SET "Name" = EXCLUDED."Name",
                 "AvatarUrl" = EXCLUDED."AvatarUrl"
