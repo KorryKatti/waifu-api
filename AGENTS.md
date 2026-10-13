@@ -25,22 +25,48 @@ builds with.
 ## The Go rewrite: validated, merged, not yet deployed
 
 `backend/go` is a complete, tested replacement for the C# service. It is on
-`main`. **Production still runs the C# service**, and deploying Go is an
+`main`. **Production still runs the C# service**, and switching it over is an
 outstanding step, not a completed one.
 
-- `docker-compose.yml`, `.github/workflows/docker-image.yml` and Render still
-  point at the C# service. **There is no workflow that publishes a Go image**,
-  so nothing to point at yet.
-- The C# service stays deployed and must keep building in Release. It is the
-  behavioural oracle the Go tests compare against, and the source the one-time
-  fingerprint migration ran against. Removing it removes both.
-- Deploying means: publish a Go image, repoint `docker-compose.yml`, repoint
-  Render. The code itself needs nothing further.
-- The fingerprint migration is **done**. `PerceptualHash` holds Go hashes on all
-  4,287 rows; `PerceptualHashLegacy` holds the original C# values as the undo.
-  Run in order: migration (done), `tools/legacyload` (done), `tools/backfill`
-  (done). Until the cutover, **C# duplicate detection is 0%** — a Go-written
-  column is not comparable to a C#-computed one. Nothing else is affected.
+### How it deploys: two fields in the Render dashboard
+
+Render builds this service from source rather than pulling a published image, so
+no CI image-publishing workflow is needed and none exists. To point it at Go:
+
+| Field | From | To |
+|---|---|---|
+| Dockerfile Path | `backend/Dockerfile` | `backend/go/Dockerfile` |
+| Docker Build Context Directory | `backend/` | `backend/go` |
+
+Both are relative to the repo root. **Leave the hostname alone.** The Cloudflare
+Worker in `scripts/mirror/worker` hardcodes
+`API_ORIGIN = "https://waifu-api-031n.onrender.com"`, so a new Render service
+would 404 every anonymous API read the moment it went live. Swapping the image
+on the existing service keeps the hostname and changes nothing upstream of it.
+`bot/.env.example` names the same host.
+
+`docker-compose.yml` and `docker-compose.preprod.yml` build the Go backend the
+same way, so local and production match.
+
+### Two things safe to know about the switch
+
+**The boot-time cleanup is harmless.** `background.runJob` runs each job once at
+startup, and `StatsCleanup` issues `DeleteDailyStatsBefore` — which sounds
+alarming and is not. Go uses `AddDate(-1, 0, 0)` and C# uses `AddYears(-1)`:
+the same one-year cutoff, and `DailyStats` currently holds 7 rows, none older
+than a year. It would delete nothing. Revisit if that table ever passes a year
+of data.
+
+**Duplicate detection is off until the switch.** `PerceptualHash` now holds Go
+hashes, which a C# upload cannot match — distances land near 32 against a
+threshold of 4. This is why the cutover is worth doing rather than skipping.
+
+### The C# service stays
+
+It is the behavioural oracle the Go tests compare against, and
+`.github/workflows/docker-image.yml` keeps building it in Release. Removing
+either removes the thing that makes the rewrite trustworthy. Do not repoint that
+workflow.
 
 Full record, including two production bugs this found and how they were
 measured: `plans/cutover-validation-log.md`. Plan and reasoning:
