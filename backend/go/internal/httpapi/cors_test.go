@@ -28,7 +28,7 @@ func TestCORSPreflightIsAnswered(t *testing.T) {
 	for header, want := range map[string]string{
 		"Access-Control-Allow-Origin":  "*",
 		"Access-Control-Allow-Methods": "",
-		"Access-Control-Allow-Headers": "*",
+		"Access-Control-Allow-Headers": "Origin, Content-Type, Accept, Authorization, X-Api-Key, X-Requested-With",
 	} {
 		got := rec.Header().Get(header)
 		if got == "" {
@@ -75,5 +75,31 @@ func TestCORSHeadersPresentOnErrorResponses(t *testing.T) {
 
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Errorf("no CORS header on a 500: got %q", got)
+	}
+}
+
+// Authorization is the whole point of the header list. A wildcard does not
+// cover it, and a browser that is told "*" refuses the request that follows.
+//
+// This asserts the literal value rather than checking for a wildcard, because
+// a wildcard here looks correct and fails in the browser.
+func TestCORSAllowHeadersNamesAuthorizationExplicitly(t *testing.T) {
+	h := withCORS()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/users/me", nil)
+	req.Header.Set("Origin", "https://waifu-api-eosin.vercel.app")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "authorization")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := rec.Header().Get("Access-Control-Allow-Headers")
+	if got == "*" {
+		t.Fatal("Allow-Headers is \"*\", which does not cover Authorization")
+	}
+	for _, want := range []string{"authorization", "content-type", "x-api-key"} {
+		if !strings.Contains(strings.ToLower(got), want) {
+			t.Errorf("Allow-Headers %q does not name %s", got, want)
+		}
 	}
 }

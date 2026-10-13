@@ -167,7 +167,24 @@ func withCORS() middleware {
 			header := w.Header()
 			header.Set("Access-Control-Allow-Origin", "*")
 			header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
-			header.Set("Access-Control-Allow-Headers", "*")
+
+			// The header names are listed explicitly rather than wildcarded.
+			//
+			// "*" does not cover Authorization. The Fetch standard treats it as
+			// a wildcard over the CORS-safelisted request headers, and
+			// Authorization is deliberately excluded, so a browser ignores it and
+			// then refuses the real request. Chrome says so plainly in the
+			// console:
+			//
+			//   Cross-Origin Request Warning: ... (Reason: When the
+			//   'Access-Control-Allow-Headers' is '*', the 'Authorization' header
+			//   is not covered.)
+			//
+			// and every authenticated call would fail: /users/me, /stats/admin,
+			// /reports, /review/tasks. These three are the headers this service
+			// actually reads, so they are the ones named.
+			header.Set("Access-Control-Allow-Headers",
+				"Origin, Content-Type, Accept, Authorization, X-Api-Key, X-Requested-With")
 			// Without this a browser cannot read a response header such as
 			// Location from a script, even though the request itself is allowed.
 			header.Set("Access-Control-Expose-Headers", "Location, Content-Type")
