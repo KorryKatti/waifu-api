@@ -20,7 +20,7 @@ WEBP_FALLBACK = "true"
 # Deliberately not folded into WEBP_FALLBACK. The .png path is deployed and
 # serving traffic; the .jpeg path is new. One flag would mean reverting the new
 # behaviour also silently reverts the working one.
-WEBP_JPEG_FALLBACK = "false"
+WEBP_JPEG_FALLBACK = "true"
 
 # Secrets are NOT set here on purpose. Set them with:
 #   npx wrangler secret put S3_ACCESS_KEY_ID

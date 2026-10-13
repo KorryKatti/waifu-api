@@ -185,6 +185,26 @@ def already_converted(endpoint, bucket, region, ak, sk, workers=32):
         return {i for i in pool.map(probe, ids) if i is not None}
 
 
+def flip_extension(image_ids):
+    """Point the catalogue at the .webp objects.
+
+    Deliberately before the originals are deleted. A row saying .webp makes the
+    API hand out a .webp URL, which the worker serves directly. A row still
+    saying .jpeg makes it hand out a .jpeg URL for an object that no longer
+    exists - a 404 handed to a client rather than to the bucket.
+    """
+    ids = ",".join(str(i) for i in image_ids)
+    q = (
+        'UPDATE "Images" SET "Extension" = \'.webp\' '
+        f'WHERE "Id" IN ({ids}) AND "Extension" IN (\'.jpeg\', \'.jpg\')'
+    )
+    out = subprocess.run(["psql", DATABASE, "-tA", "-c", q],
+                         capture_output=True, text=True, timeout=300)
+    if out.returncode != 0:
+        die(f"extension flip failed: {out.stderr.strip()[:200]}")
+    log(f"  flipped {out.stdout.strip()} rows to .webp")
+
+
 # ---------------------------------------------------------------------------
 # Conversion
 # ---------------------------------------------------------------------------
@@ -209,6 +229,13 @@ def main():
                     help="images per batch; bounds the storage overshoot")
     ap.add_argument("--quality", type=int, default=DEFAULT_QUALITY)
     ap.add_argument("--list", action="store_true", help="list candidates and exit")
+    ap.add_argument("--corpus", default="",
+                    help="local corpus directory; reads originals from disk "
+                         "instead of downloading each one from the bucket")
+    ap.add_argument("--flip-extension", action="store_true",
+                    help="also UPDATE Images.Extension to .webp per batch, "
+                         "before the originals are deleted")
+    ap.add_argument("--workers", type=int, default=12)
     args = ap.parse_args()
 
     env = load_env()
@@ -261,17 +288,21 @@ def main():
 
         # Convert and upload. Nothing is deleted until the batch has been
         # verified, so a failure part-way leaves every original intact.
-        pending_delete = []
-        for image_id, ext in batch:
+        def one(job):
+            image_id, ext = job
             src_key = f"{image_id}{ext}"
             dst_key = f"{image_id}.webp"
             try:
-                url, host, path = build_url(endpoint, bucket, src_key)
-                raw = read_object(url, host, path, region, ak, sk)
+                raw = None
+                if args.corpus:
+                    local = Path(args.corpus) / src_key
+                    if local.exists():
+                        raw = local.read_bytes()
                 if raw is None:
-                    log(f"  {src_key} missing from the bucket, skipping")
-                    failed += 1
-                    continue
+                    url, host, path = build_url(endpoint, bucket, src_key)
+                    raw = read_object(url, host, path, region, ak, sk)
+                if raw is None:
+                    return ("missing", src_key, 0, 0)
 
                 encoded = encode(Image, raw, args.quality)
 
@@ -283,23 +314,52 @@ def main():
                 url, host, path = build_url(endpoint, bucket, dst_key)
                 written = head_size(url, host, path, region, ak, sk)
                 if written != len(encoded):
-                    die(f"{dst_key} wrote {written} bytes, expected {len(encoded)}. "
-                        f"Originals are untouched - stop and investigate.")
-
-                pending_delete.append((src_key, len(raw) - len(encoded)))
-                converted += 1
-                saved_bytes += len(raw) - len(encoded)
-                log(f"  {src_key} {len(raw)>>10}K -> {dst_key} {len(encoded)>>10}K "
-                    f"({100*(1-len(encoded)/len(raw)):.0f}% smaller)")
+                    return ("corrupt", dst_key, len(raw), len(encoded))
+                return ("ok", src_key, len(raw), len(encoded))
             except Exception as e:
+                return ("error", f"{src_key} FAILED: {e}", 0, 0)
+
+        results = []
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            for res in pool.map(one, batch):
+                results.append(res)
+
+        pending_delete = []
+        corrupt = [r for r in results if r[0] == "corrupt"]
+        if corrupt:
+            die(f"{corrupt[0][1]} wrote {corrupt[0][3]} bytes, expected "
+                f"{corrupt[0][2]}. Originals are untouched - stop and investigate.")
+
+        for status, key, orig_bytes, new_bytes in results:
+            if status != "ok":
                 failed += 1
-                log(f"  {src_key} FAILED: {e}")
+                log(f"  {key}")
+                continue
+            pending_delete.append((key, orig_bytes - new_bytes))
+            converted += 1
+            saved_bytes += orig_bytes - new_bytes
+
+        converted_ids = [int(key.split(".")[0]) for status, key, _, _ in results
+                         if status == "ok" and key.split(".")[0].isdigit()]
+        log(f"  {converted} converted in this batch")
+
+        if args.flip_extension and converted_ids:
+            flip_extension(converted_ids)
 
         if args.delete_originals:
-            for key, freed in pending_delete:
+            def kill(job):
+                key, _freed = job
                 url, host, path = build_url(endpoint, bucket, key)
-                delete_object(url, host, path, region, ak, sk)
-                deleted += 1
+                try:
+                    delete_object(url, host, path, region, ak, sk)
+                except Exception as e:
+                    log(f"    delete {key} failed: {e}")
+
+            # Concurrent: sequential deletes dominated the batch time, ~70s per
+            # 100 against ~30s for the whole convert step.
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                list(pool.map(kill, pending_delete))
+            deleted += len(pending_delete)
             log(f"  deleted {len(pending_delete)} originals, freed {sum(f for _, f in pending_delete)>>20} MB")
         else:
             log(f"  kept {len(pending_delete)} originals")

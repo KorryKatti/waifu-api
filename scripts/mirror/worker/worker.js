@@ -179,14 +179,15 @@ export default {
     // sniffs (browsers, Discord, sharp, Pillow) is unaffected; only a client
     // that asserts content-type against the .png extension would object.
     //
-    // WEBP_FALLBACK is a kill switch: set it to "false" and this whole path is
-    // skipped, restoring plain .png -> .png in one deploy.
+    // WEBP_FALLBACK and WEBP_JPEG_FALLBACK are kill switches; see
+    // webpCandidate. A false value skips the whole path, restoring plain
+    // .png -> .png in one deploy.
     const webpKey = webpCandidate(key, env);
 
     let origin = null;
     let servedKey = key;
 
-    if (useWebp && webpKey) {
+    if (webpKey) {
       origin = await getObject(webpKey);
       if (origin) servedKey = webpKey;
     }
