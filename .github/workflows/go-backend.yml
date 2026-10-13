@@ -1,0 +1,238 @@
+name: Go backend
+
+# CI for the Go rewrite.
+#
+# The C# pipeline in docker-image.yml is left untouched: it must keep building
+# for as long as the C# service is still deployed. See PLAN.md section 6.7,
+# which requires the reference implementation to stay buildable so it can serve
+# as the contract oracle.
+
+on:
+  push:
+    branches: [ 'go-rewrite', main ]
+    paths:
+      - 'backend/go/**'
+      # The route check reads frontend/src, so a frontend change can break this
+      # workflow. Without this path, renaming an api.get() call would fail in
+      # production and never run a build.
+      - 'frontend/src/**'
+      - '.github/workflows/go-backend.yml'
+  pull_request:
+    paths:
+      - 'backend/go/**'
+      - 'frontend/src/**'
+      - '.github/workflows/go-backend.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch cancels the previous run. There is no value in
+# testing an older commit.
+concurrency:
+  group: go-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: backend/go
+
+jobs:
+  # Gates the build: nothing downstream runs if this fails.
+  verify:
+    name: Vet, format and route check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache-dependency-path: backend/go/go.sum
+
+      # Download modules once so later steps do not each pay for it.
+      - name: Download modules
+        run: go mod download
+
+      # go vet catches a real class of bug, including format-string mistakes
+      # and unreachable code.
+      - name: Vet
+        run: go vet ./...
+
+      # Formatting is checked rather than enforced silently. It is reported as a
+      # diff so a contributor can apply it with gofmt -w.
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::The following files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # Compares the routes this service registers against the endpoints the
+      # frontend actually calls.
+      #
+      # This is here rather than in the test suite because routecheck reads the
+      # frontend source, and no Go test package does. Nothing else in this
+      # workflow notices a route that was renamed, moved or dropped on one side
+      # only: the Go tests would still pass, and the deployed service would
+      # return 404 to the running site.
+      #
+      # The flag is spelled out rather than left to the tool's default so the
+      # path is visible where it matters. Either way it is relative to
+      # backend/go, not to the repository root.
+      - name: Check frontend routes are served
+        run: go run ./tools/routecheck -frontend ../../frontend/src
+
+  # The whole test suite, against a real Postgres with the frozen schema.
+  #
+  # This runs ./... rather than only ./internal/httpapi/ on purpose. Every package
+  # with a test needs to be exercised somewhere, and splitting the suite across
+  # jobs is how packages quietly stop being tested at all.
+  #
+  # The HTTP integration tests refuse to run without WAIFU_TEST_DATABASE_URL
+  # rather than skipping, so this job is the only place they can execute — which
+  # is the point. A silently skipped suite reported green while the service could
+  # not start at all; see the comment in integration_test.go.
+  integration:
+    name: Full test suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: waifuapi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d waifuapi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache-dependency-path: backend/go/go.sum
+
+      - name: Download modules
+        working-directory: backend/go
+        run: go mod download
+
+      # The schema is documented in-repo and matches the frozen EF model
+      # snapshot. Applying it here keeps the test database honest rather than
+      # relying on whatever a developer happens to have locally.
+      - name: Apply frozen schema
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec "${{ job.services.postgres.id }}"                  pg_isready -U postgres -d waifuapi >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec -i "${{ job.services.postgres.id }}" psql -U postgres -d waifuapi             < backend/go/internal/store/schema.sql
+
+      # -race is on everywhere, not just the HTTP tests: the request counter runs
+      # on a detached goroutine after the response, which is exactly the kind of
+      # thing a race detector is for.
+      - name: Run full test suite
+        working-directory: backend/go
+        run: go test -race -timeout 10m ./...
+        env:
+          WAIFU_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/waifuapi
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: backend/go/coverage.out
+          if-no-files-found: ignore
+
+  # Builds the container and runs the full image, proving the Dockerfile and the
+  # distroless base actually work rather than only compiling.
+  container:
+    name: Build and smoke-test image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f Dockerfile -t waifu-api-go:ci backend/go
+
+      # The service validates its configuration at startup and exits non-zero
+      # on a bad configuration, so a smoke test needs a full set of variables.
+      # The database connection is expected to fail here; this asserts
+      # configuration validation specifically, by confirming the failure message
+      # is about the database rather than about a missing variable.
+      - name: Startup smoke test
+        run: |
+          set -o pipefail
+          output=$(docker run --rm waifu-api-go:ci 2>&1 || true)
+          echo "$output"
+          if echo "$output" | grep -q "invalid configuration"; then
+            echo "::error::Configuration validation rejected an incomplete environment"
+            exit 1
+          fi
+
+      # Report the image size. This is the number that matters on a 512 MB free
+      # tier, so it is surfaced rather than left implicit.
+      - name: Report image size
+        run: |
+          size=$(docker image inspect waifu-api-go:ci --format '{{.Size}}')
+          echo "Image size: $((size / 1024 / 1024)) MB"
+
+  # The perceptual-hash spike from PLAN.md section 6.1.
+  #
+  # This needs the .NET SDK to run the C# oracle, so it is a separate job with a
+  # longer timeout. It regenerates the corpus and reference vectors rather than
+  # trusting committed binaries.
+  phash-oracle:
+    name: Perceptual hash oracle parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache-dependency-path: backend/go/go.sum
+
+      - name: Generate deterministic corpus
+        working-directory: backend/go
+        run: go run ./tools/corpusgen /tmp/corpus
+
+      - name: Generate C# reference vectors
+        working-directory: backend/go
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/out
+          docker run --rm \
+            -v "${PWD}/tools/oracle:/src" \
+            -v /tmp/corpus:/input:ro \
+            -v /tmp/out:/out \
+            -w /src \
+            mcr.microsoft.com/dotnet/sdk:10.0 \
+            bash -c '
+              dotnet restore -v quiet --nologo &&
+              dotnet build -c Release -o /out/bin -v quiet --nologo &&
+              dotnet /out/bin/HashGen.dll /input /out/golden.tsv
+            '
+          wc -l /tmp/out/golden.tsv
+
+      # The reference is known NOT to reproduce itself; see the header comment in
+      # reference_test.go. This job therefore verifies determinism and the
+      # structural properties rather than demanding bit-equality, and the
+      # self-inconsistency measurement is logged for future reference.
+      - name: Parity and determinism tests
+        working-directory: backend/go
+        run: go test -v -timeout 20m ./internal/images/phash/...
+        env:
+          PHASH_CORPUS_DIR: /tmp/corpus

@@ -1,0 +1,126 @@
+// Package storage uploads image bytes to object storage.
+//
+// # Why an interface
+//
+// The upload handler needs to write a file and then be able to fail the whole
+// operation. Both the C# service and this one handle that with a transaction
+// plus a compensating delete. Keeping storage behind an interface means the
+// handler can be tested without a running MinIO or a cloud bucket, which
+// matters because the interesting behaviour is the rollback, not the PUT.
+package storage
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+)
+
+// ErrNotFound is returned when an object does not exist.
+var ErrNotFound = errors.New("object not found")
+
+// Store is the subset of object storage this service needs.
+type Store interface {
+	// Put writes an object. It must be safe to call with a reader that yields
+	// an error partway through, in which case nothing should be committed.
+	Put(ctx context.Context, key string, body io.Reader, contentType string) error
+
+	// Get reads an object's bytes.
+	//
+	// It is absent from the request path, which only ever writes, and exists
+	// for the perceptual hash backfill, which has to re-read every stored image
+	// to compute a comparable fingerprint. Returning ErrNotFound is required;
+	// the backfill needs to tell "absent" apart from "unreachable" so a row is
+	// never silently left holding a stale value.
+	Get(ctx context.Context, key string) ([]byte, error)
+
+	// GetWithFallback reads an image, trying each key ObjectKeyCandidates
+	// returns until one exists.
+	//
+	// Exists so the WebP fallback cannot be forgotten by one caller and
+	// implemented by another, which is how the corpus backfill ended up
+	// reporting every PNG as missing while the Worker served them.
+	GetWithFallback(ctx context.Context, id int64, extension string) ([]byte, string, error)
+
+	// Delete removes an object.
+	//
+	// Deleting something that is already absent is not an error, because the
+	// rollback path calls this after a partial failure and must be idempotent.
+	Delete(ctx context.Context, key string) error
+
+	// Exists reports whether an object is present.
+	Exists(ctx context.Context, key string) (bool, error)
+
+	// List returns every object key in the bucket.
+	//
+	// It exists for the storage reconciliation tool, which compares the bucket
+	// contents against the catalogue. Implementations that cannot enumerate a
+	// bucket cheaply may return an empty slice and a nil error, which the caller
+	// treats as "nothing to report" rather than as a failure.
+	List(ctx context.Context) ([]string, error)
+}
+
+// ObjectKey builds the storage key for an image.
+//
+// Exported because the upload handler builds the same key in order to delete it
+// when a partial failure needs unwinding.
+//
+// The C# service stores images as "{id}.{extension}" at the bucket root, and
+// the Cloudflare Worker in front of storage reconstructs that path, so the key
+// format is part of the contract and must not change.
+func ObjectKey(id int64, extension string) string {
+	return fmt.Sprintf("%d%s", id, extension)
+}
+
+// NormalizeExtension returns a lower-cased extension including the leading dot,
+// defaulting to ".jpg" when the supplied value is unusable.
+//
+// A missing extension would produce a key the CDN Worker cannot serve, so this
+// falls back rather than writing an unreachable object.
+func NormalizeExtension(extension string) string {
+	cleaned := strings.ToLower(strings.TrimSpace(extension))
+	if cleaned == "" {
+		return ".jpg"
+	}
+	if !strings.HasPrefix(cleaned, ".") {
+		cleaned = "." + cleaned
+	}
+	// Guard against a value that is only dots, or contains a path separator
+	// which would let a crafted extension escape the intended key.
+	if strings.Trim(cleaned, ".") == "" || strings.ContainsAny(cleaned, "/\\") {
+		return ".jpg"
+	}
+	return cleaned
+}
+
+// webpExtension is the stored form of every PNG in the bucket.
+const webpExtension = ".webp"
+
+// ObjectKeyCandidates returns the keys an image may be stored under, in the
+// order they should be tried.
+//
+// PNGs were converted to WebP when they were uploaded, for storage reasons, and
+// are still served back at their original .png path for compatibility. That
+// decision lives in two places — the upload path and the Cloudflare Worker in
+// scripts/mirror/worker, which rewrites a .png request to the .webp object when
+// the former is absent.
+//
+// Anything reading the corpus straight from the bucket has to repeat that
+// fallback or it silently misses every PNG. About 27% of the catalogue, so a
+// run without it looks like mass data loss rather than a key convention.
+//
+// Hashing the WebP is correct rather than a compromise: the conversion happens
+// before the fingerprint is computed, so the stored object is what the
+// duplicate check was always comparing.
+//
+// Only PNG falls back, matching the Worker. A missing JPEG has no WebP sibling
+// and should be reported missing.
+func ObjectKeyCandidates(id int64, extension string) []string {
+	key := ObjectKey(id, extension)
+	normalized := NormalizeExtension(extension)
+	if normalized != ".png" {
+		return []string{key}
+	}
+	return []string{key, ObjectKey(id, webpExtension)}
+}

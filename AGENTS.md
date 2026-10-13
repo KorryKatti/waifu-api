@@ -22,6 +22,49 @@ docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet 
 There is no local `dotnet`; use the SDK container. It is the same SDK Render
 builds with.
 
+## The Go rewrite: validated, merged, not yet deployed
+
+`backend/go` is a complete, tested replacement for the C# service. It is on
+`main`. **Production still runs the C# service**, and deploying Go is an
+outstanding step, not a completed one.
+
+- `docker-compose.yml`, `.github/workflows/docker-image.yml` and Render still
+  point at the C# service. **There is no workflow that publishes a Go image**,
+  so nothing to point at yet.
+- The C# service stays deployed and must keep building in Release. It is the
+  behavioural oracle the Go tests compare against, and the source the one-time
+  fingerprint migration ran against. Removing it removes both.
+- Deploying means: publish a Go image, repoint `docker-compose.yml`, repoint
+  Render. The code itself needs nothing further.
+- The fingerprint migration is **done**. `PerceptualHash` holds Go hashes on all
+  4,287 rows; `PerceptualHashLegacy` holds the original C# values as the undo.
+  Run in order: migration (done), `tools/legacyload` (done), `tools/backfill`
+  (done). Until the cutover, **C# duplicate detection is 0%** — a Go-written
+  column is not comparable to a C#-computed one. Nothing else is affected.
+
+Full record, including two production bugs this found and how they were
+measured: `plans/cutover-validation-log.md`. Plan and reasoning:
+`backend/go/internal/images/phash/MIGRATION.md`.
+
+### Never point the Go service at the production database
+
+`background.runJob` runs each cleanup job **once at startup**, before its daily
+ticker, matching the C# behaviour. `StatsCleanup` is unconditional and issues
+`DeleteDailyStatsBefore`. Booting Go against production deletes rows immediately.
+
+### PNGs are stored as WebP
+
+Every PNG is converted at upload and served back at its `.png` path by the
+Worker. `Image.Extension` is still `.png`, so a plain `{id}{ext}` fetch misses
+all 1,162 PNG rows and reports them absent. Use `storage.ObjectKeyCandidates`
+rather than constructing the key yourself.
+
+### Duplicate detection has never worked, on any implementation
+
+The C# hashes do not reproduce themselves, and v6 — which was Go — had no
+duplicate detection at all. The threshold of `4` was chosen against an algorithm
+that never existed consistently. Re-tune it from the real distribution.
+
 ### Known licensing trap
 
 `SixLabors.ImageSharp` **4.x is commercially licensed** and fails Release
@@ -57,6 +100,26 @@ Six Labors license or replacing ImageSharp entirely.
   **64 binary characters**, not hex. The API exposes it as 16 lowercase hex
   chars via `BitArrayHelper.ToHex`. Mixing the two up silently breaks
   comparison.
+
+### Perceptual hashes are not comparable across the two backends
+
+The C# service does not reproduce its own hashes. Running the oracle twice on
+one corpus with identical library versions, once normally and once with
+`DOTNET_EnableHWIntrinsic=0`, gave **248/554 identical** hashes, with
+divergences up to 38 bits — `ResizeKernel.ConvolveCore` accumulates with
+`Vector256.MultiplyAddEstimate` when AVX2 is present and a scalar float loop
+when it is not, and the two do not agree.
+
+So the ~4,000 stored hashes are a **mixture of at least two algorithms**,
+decided by whichever machine computed them. Consequences worth remembering:
+
+- A hash computed by the Go backend will **not** match historical rows, so
+  duplicate detection is blind across the boundary until a rehash backfill runs.
+- The Hamming threshold of 4 was chosen assuming a stable hash. It needs
+  re-validating after that backfill.
+- `internal/images/phash` is intentionally *not* chasing bit-exactness. Further
+  filter tuning cannot close a gap whose far side moves with the CPU. See
+  `backend/go/tools/oracle/README.md` for the full findings.
 
 ## Verifying your own work
 

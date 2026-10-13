@@ -1,0 +1,252 @@
+// Command server runs the waifu-api HTTP service.
+//
+// # Startup order
+//
+// Configuration is loaded and validated first, then the database connection is
+// established, and only then does the listener start. A failure at any step
+// exits non-zero with a message on stderr.
+//
+// This ordering is deliberate. The C# service fails fast on missing
+// configuration (Program.cs ValidateConfiguration), and this service keeps that
+// behaviour. Starting with a half-understood configuration would mean a process
+// that accepts traffic it cannot correctly authorise.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"waifuapi/internal/auth"
+	"waifuapi/internal/background"
+	"waifuapi/internal/cdncache"
+	"waifuapi/internal/config"
+	"waifuapi/internal/discord"
+	"waifuapi/internal/httpapi"
+	"waifuapi/internal/logging"
+	"waifuapi/internal/repo"
+	"waifuapi/internal/storage"
+	"waifuapi/internal/store"
+)
+
+func main() {
+	if err := run(); err != nil {
+		// Written to stderr directly rather than through the logger, because the
+		// logger may not have been constructed yet.
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// run contains the startup and shutdown sequence, kept separate from main so it
+// can return an error rather than calling os.Exit, which defers would otherwise
+// skip.
+func run() error {
+	// ---- Configuration -------------------------------------------------
+	cfg, err := config.Load(config.NewLoader())
+	if err != nil {
+		return err
+	}
+
+	// LOG_LEVEL is this service's own key. Logging__LogLevel__Default is the
+	// C# key, and an existing deployment will have that one set rather than this
+	// one. Falling back to it means an environment carried over from the C#
+	// service silences logs the way it already does, instead of silently
+	// reverting to info because a key nobody had heard of was unset.
+	level := os.Getenv("LOG_LEVEL")
+	if level == "" {
+		level = os.Getenv("Logging__LogLevel__Default")
+	}
+
+	log := logging.New(logging.Options{
+		Environment: cfg.Environment,
+		Level:       level,
+	})
+	slog.SetDefault(log)
+
+	log.Info("starting waifu-api",
+		"environment", cfg.Environment,
+		"port", cfg.Port,
+		"base_path", cfg.BasePathOrRoot(),
+	)
+
+	// ---- Database ------------------------------------------------------
+	// A generous startup timeout: a cold database or a busy pooler can take a
+	// moment, and failing immediately would turn a transient condition into a
+	// crash loop.
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelStartup()
+
+	db, err := store.Open(startupCtx, store.Config{
+		URL:            cfg.DatabaseURL,
+		MaxConnections: 8,
+	})
+	if err != nil {
+		return fmt.Errorf("connect to database: %w", err)
+	}
+	defer db.Close()
+
+	log.Info("database connected")
+
+	// ---- HTTP ----------------------------------------------------------
+	data := repo.New(db.Pool())
+	tokens := auth.NewTokenIssuer(cfg.JWT)
+	authenticator := auth.NewAuthenticator(tokens)
+
+	discordClient := discord.NewClient(discord.Config{
+		ClientID:     cfg.Discord.ClientID,
+		ClientSecret: cfg.Discord.ClientSecret,
+		RedirectURI:  cfg.Discord.RedirectURI,
+	}, os.Getenv("DISCORD_API_BASE_URL"))
+	if err := discordClient.Validate(); err != nil {
+		// Not fatal: Discord login is one feature, and refusing to start would
+		// take the whole API down for a configuration problem that only affects
+		// it. The endpoints report the misconfiguration when called.
+		log.Warn("discord oauth is not fully configured", "error", err.Error())
+	}
+
+	// Object storage is required for uploads. It is constructed eagerly so a
+	// misconfigured bucket fails at startup rather than on the first upload,
+	// matching the behaviour of the C# service.
+	files, err := storage.NewS3Store(storage.Config{
+		Provider:       storage.Provider(cfg.S3.Provider),
+		AccessKey:      cfg.S3.AccessKey,
+		SecretKey:      cfg.S3.SecretKey,
+		ServiceURL:     cfg.S3.ServiceURL,
+		Region:         cfg.S3.Region,
+		BucketName:     cfg.S3.BucketName,
+		ForcePathStyle: cfg.S3.ForcePathStyle,
+	})
+	if err != nil {
+		return err
+	}
+	log.Info("object storage configured",
+		"provider", cfg.S3.Provider,
+		"bucket", cfg.S3.BucketName,
+		"pathStyle", cfg.S3.ForcePathStyle)
+
+	// Edge cache purging is optional. Without Cloudflare credentials the purger
+	// no-ops, which is correct for a deployment that serves images without the
+	// edge in front, so it must not stop the service from starting.
+	purger := cdncache.New(cdncache.Config{
+		ZoneID:  cfg.Cloudflare.ZoneID,
+		Token:   cfg.Cloudflare.Token,
+		BaseURL: cfg.CDN.BaseURL,
+
+		TransformEnabled: cfg.ImageTransform.Enabled,
+		TransformPath:    cfg.ImageTransform.Path,
+		WidthParam:       cfg.ImageTransform.WidthParam,
+		CardWidth:        cfg.ImageTransform.CardWidth,
+		PreviewWidth:     cfg.ImageTransform.PreviewWidth,
+	}, nil, cacheWarnLogger{log: log})
+
+	if purgerIsConfigured(cfg) {
+		log.Info("cloudflare cache purge enabled", "zone", cfg.Cloudflare.ZoneID)
+	}
+
+	server := httpapi.NewServer(cfg, db, data, log, files, discordClient, tokens, purger)
+
+	mux := http.NewServeMux()
+	server.Register(mux)
+
+	handler := server.Handler(mux, authenticator, data)
+
+	// ---- Periodic maintenance ------------------------------------------
+	// Started before Serve so a cleanup job can never delay startup, and given
+	// a background context so it stops with the process rather than with the
+	// shutdown of an in-flight request.
+	jobs := []background.Job{background.StatsCleanup(data, backgroundLogger{log})}
+
+	if job, enabled := background.ReviewTaskCleanup(
+		data, cfg.Review.TaskRetentionDays, backgroundLogger{log}); enabled {
+		jobs = append(jobs, job)
+	} else {
+		log.Info("review task pruning disabled", "retentionDays", cfg.Review.TaskRetentionDays)
+	}
+
+	background.Start(context.Background(), backgroundLogger{log}, jobs...)
+
+	httpServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.Port),
+		Handler: handler,
+
+		// Generous timeouts. They exist to shed genuinely stuck connections,
+		// not to cut off slow-but-progressing work.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	// ---- Serve ---------------------------------------------------------
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Info("listening", "addr", httpServer.Addr)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+			return
+		}
+		serveErr <- nil
+	}()
+
+	// ---- Shutdown ------------------------------------------------------
+	// Wait for SIGINT or SIGTERM. Render, Docker and every other host send
+	// SIGTERM on deploy, so handling it is what makes zero-downtime restarts
+	// possible.
+	shutdownSignal := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			return fmt.Errorf("http server: %w", err)
+		}
+		return nil
+
+	case sig := <-shutdownSignal:
+		log.Info("shutdown signal received", "signal", sig.String())
+
+		// In-flight requests get a bounded window to finish, so a deploy does
+		// not sever requests that are already being served.
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancelShutdown()
+
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Error("graceful shutdown failed", "error", err)
+			return fmt.Errorf("shutdown: %w", err)
+		}
+
+		log.Info("shutdown complete")
+		return nil
+	}
+}
+
+// purgerIsConfigured reports whether edge purging will actually do anything.
+func purgerIsConfigured(cfg *config.Config) bool {
+	return cfg.Cloudflare.ZoneID != "" && cfg.Cloudflare.Token != ""
+}
+
+// cacheWarnLogger adapts the structured logger to the narrower interface the
+// cache purger needs, so that package does not have to depend on slog.
+type cacheWarnLogger struct{ log *slog.Logger }
+
+func (l cacheWarnLogger) Warn(msg string, err error, args ...any) {
+	if err != nil {
+		l.log.Warn(msg, append([]any{"error", err.Error()}, args...)...)
+		return
+	}
+	l.log.Warn(msg, args...)
+}
+
+// backgroundLogger adapts the structured logger to the maintenance jobs' narrow
+// interface, so that package does not depend on slog.
+type backgroundLogger struct{ log *slog.Logger }
+
+func (l backgroundLogger) Info(msg string, args ...any)  { l.log.Info(msg, args...) }
+func (l backgroundLogger) Error(msg string, args ...any) { l.log.Error(msg, args...) }
