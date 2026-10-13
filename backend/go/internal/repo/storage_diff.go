@@ -3,23 +3,24 @@ package repo
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"waifuapi/internal/storage"
 	"waifuapi/internal/store/models"
 )
 
-// catalogueKey is the storage key for an image row.
+// ListCatalogueKeys returns every image's expected storage keys, keyed by
+// object name, mapped to the image id.
 //
-// S3Service writes "{id}{extension}" at the bucket root, so this reconstruction
-// is what storage is expected to contain.
-func catalogueKey(id int64, extension string) string {
-	return fmt.Sprintf("%d%s", id, extension)
-}
-
-// ListCatalogueKeys returns every image's expected storage key.
+// The keys come from storage.ObjectKeyCandidates rather than a single
+// "{id}{extension}" reconstruction, because a PNG row is stored as "{id}.webp".
+// Every PNG is converted at upload and served back at its .png path by the
+// Worker, so a catalogue that expects only "{id}.png" reports all 1,162 of them
+// as orphans in S3 - and the storage-diff page shows a delete button beside them.
 //
-// The comparison is done in Go rather than SQL because the other half of the
-// comparison is a bucket listing, which is not a query. Pulling id and extension
-// is cheap next to a listing.
+// A row therefore contributes every key it could plausibly occupy. A stored
+// object is an orphan only when it matches none of them, and a row is missing
+// only when none of its keys are in the bucket.
 func (r *Repo) ListCatalogueKeys(ctx context.Context) (map[string]int64, error) {
 	rows, err := r.db.Query(ctx, `SELECT "Id", "Extension" FROM "Images"`)
 	if err != nil {
@@ -34,9 +35,35 @@ func (r *Repo) ListCatalogueKeys(ctx context.Context) (map[string]int64, error) 
 		if err := rows.Scan(&id, &extension); err != nil {
 			return nil, fmt.Errorf("scan catalogue key: %w", err)
 		}
-		keys[catalogueKey(id, extension)] = id
+		for _, key := range storage.ObjectKeyCandidates(id, extension) {
+			// First writer wins, so a key maps to the row claiming it. With
+			// unique ids the only variable part is the extension, so this cannot
+			// collide in practice.
+			if _, taken := keys[key]; !taken {
+				keys[key] = id
+			}
+		}
 	}
 	return keys, rows.Err()
+}
+
+// CatalogueKeyFor picks the name to show an operator for a missing row.
+//
+// The catalogued extension is preferred over the storage fallback, because the
+// operator knows the image by the extension the catalogue records, not by the
+// one the object happens to be stored under. ObjectKeyCandidates lists the
+// catalogued key first, so that is the one reported.
+func CatalogueKeyFor(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	best := keys[0]
+	for _, key := range keys {
+		if !strings.HasSuffix(key, ".webp") {
+			return key
+		}
+	}
+	return best
 }
 
 // DeleteImages removes catalogue rows in bulk.

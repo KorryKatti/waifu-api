@@ -149,20 +149,40 @@ func (s *Server) computeStorageDiff(r *http.Request, mode diffMode) ([]storageDi
 
 	// MissingFromS3: catalogue rows whose object is gone.
 	//
-	// expected is keyed by object name; the sort makes paging stable, which
-	// matters because the in-memory page is recomputed on every request and an
-	// unstable order would let a row appear on two pages.
-	keys := make([]string, 0, len(expected))
-	for key := range expected {
-		if !present[key] {
-			keys = append(keys, key)
+	// Grouped by row rather than by key. A PNG row has two candidate keys - the
+	// .png it is catalogued under and the .webp it is actually stored as - so
+	// testing each key on its own reports the .png as missing while the .webp
+	// sits right there in the bucket. The row is present if any of its keys is.
+	keysByID := make(map[int64][]string, len(expected))
+	for key, id := range expected {
+		keysByID[id] = append(keysByID[id], key)
+	}
+
+	missingIDs := make([]int64, 0, 16)
+	for id, keys := range keysByID {
+		found := false
+		for _, key := range keys {
+			if present[key] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missingIDs = append(missingIDs, id)
 		}
 	}
-	sort.Strings(keys)
+	// Sorted so paging is stable: the in-memory page is recomputed on every
+	// request and an unstable order would let a row appear on two pages.
+	sort.Slice(missingIDs, func(i, j int) bool { return missingIDs[i] < missingIDs[j] })
 
-	entries := make([]storageDiffDto, 0, 16)
-	for _, key := range keys {
-		entries = append(entries, storageDiffDto{ID: pointerTo(expected[key]), FileName: key})
+	entries := make([]storageDiffDto, 0, len(missingIDs))
+	for _, id := range missingIDs {
+		// Reported under the catalogued extension, which is what the operator
+		// knows the image by.
+		entries = append(entries, storageDiffDto{
+			ID:       pointerTo(id),
+			FileName: repo.CatalogueKeyFor(keysByID[id]),
+		})
 	}
 
 	imageIDs := make([]int64, 0, len(entries))
