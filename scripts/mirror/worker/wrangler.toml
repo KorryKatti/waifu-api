@@ -15,6 +15,13 @@ API_ORIGIN = "https://waifu-api-031n.onrender.com"
 # and redeploy to restore plain .png -> .png, touching nothing else.
 WEBP_FALLBACK = "true"
 
+# Separate kill switch for .jpeg/.jpg -> .webp.
+#
+# Deliberately not folded into WEBP_FALLBACK. The .png path is deployed and
+# serving traffic; the .jpeg path is new. One flag would mean reverting the new
+# behaviour also silently reverts the working one.
+WEBP_JPEG_FALLBACK = "false"
+
 # Secrets are NOT set here on purpose. Set them with:
 #   npx wrangler secret put S3_ACCESS_KEY_ID
 #   npx wrangler secret put S3_SECRET_ACCESS_KEY

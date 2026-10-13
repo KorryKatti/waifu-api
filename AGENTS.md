@@ -85,6 +85,60 @@ Worker. `Image.Extension` is still `.png`, so a plain `{id}{ext}` fetch misses
 all 1,162 PNG rows and reports them absent. Use `storage.ObjectKeyCandidates`
 rather than constructing the key yourself.
 
+### The free tier is 5 GB, not 10 — and the cap is hit from both directions
+
+Tigris allows **5 GB** of standard storage. Cloudflare R2 allows 10, but R2
+requires a card on the account, which is why Tigris is the bucket. The bucket
+held ~4.6 GB with 4,287 images.
+
+**The conversion order matters more than the conversion.** Writing every
+`.webp` alongside the originals before deleting any of them would peak at
+roughly 7.6 GB — over the cap, and over it for the entire run rather than
+momentarily. `scripts/mirror/webp_backfill.py` therefore works in batches:
+convert, upload, **verify the written size by reading it back**, and only then
+delete that batch's originals. Storage never rises by more than one batch.
+
+### JPEG → WebP is worth 57% here, not the usual 25–35%
+
+Measured on 24 of this project's own JPEGs, SSIM against the original, libwebp
+via Pillow `method=4`:
+
+| quality | size saved | mean SSIM | min SSIM | files < 0.95 |
+| --- | --- | --- | --- | --- |
+| 75 | 71.5% | 0.979 | 0.915 | 1/24 |
+| 80 | 65.4% | 0.983 | 0.932 | 1/24 |
+| **85** | **57.5%** | **0.987** | **0.953** | **0/24** |
+| 90 | 43.9% | 0.991 | 0.970 | 0/24 |
+
+85 is the setting. **Do not retune it from a blog post** — the reason it beats
+the published range is that anime art is mostly flat colour, and the
+transform-based predictor handles large uniform regions far better than the
+JPEG corpus those figures are measured on.
+
+**Dimensions are never changed.** Re-encoding alters bytes only, so `Width` and
+`Height` stay correct and the resolution filter keeps working. Resizing would
+change both, and that is a different decision with a different cost — the
+catalogue holds 489 images over 4000px averaging 5.9 MB each, which is a
+third of the bytes and the obvious next target if storage is tight again.
+
+**AVIF is not an option.** Discord's media proxy does not render it, and bots
+are the main consumer of this API.
+
+### The worker's WebP mapping has two kill switches now
+
+`webpCandidate()` in `worker.js` maps `.png` and `.jpeg`/`.jpg` to `.webp`,
+under `WEBP_FALLBACK` and `WEBP_JPEG_FALLBACK` respectively. They are separate
+because the `.png` path is deployed and serving traffic while the `.jpeg` one
+is new; one flag would mean reverting the new behaviour also silently reverts
+the working one. `.gif` is deliberately excluded — re-encoding animation for
+storage is how you get artefacts.
+
+The function is pure and covered by `worker.js`'s `webp_candidate.test.mjs`
+(`node webp_candidate.test.mjs`). Run it after touching the extension
+arithmetic: a mistake there turns a working image into a 404 with no error
+anywhere. Returning `null` is always safe, since the caller falls back to the
+original key.
+
 ### `/storage-diff` had a delete button pointed at the wrong list
 
 The same trap reached `ListCatalogueKeys`, which reconstructed `{id}{ext}` and

@@ -181,9 +181,7 @@ export default {
     //
     // WEBP_FALLBACK is a kill switch: set it to "false" and this whole path is
     // skipped, restoring plain .png -> .png in one deploy.
-    const useWebp = env.WEBP_FALLBACK === "true";
-    const wantsPng = key.toLowerCase().endsWith(".png");
-    const webpKey = wantsPng ? key.slice(0, -4) + ".webp" : null;
+    const webpKey = webpCandidate(key, env);
 
     let origin = null;
     let servedKey = key;
@@ -226,6 +224,42 @@ export default {
     return response;
   },
 };
+// Extensions that may be served from a converted .webp object.
+//
+// .gif is deliberately absent: re-encoding animation for storage is how you get
+// artefacts, and the 55 animated images stay as they are. .webp is absent
+// because it is already the target format and needs no mapping.
+const WEBP_CONVERTIBLE = [".png", ".jpeg", ".jpg"];
+
+// webpCandidate returns the .webp object a request might be served from, or
+// null when it should be fetched as-is.
+//
+// Split out as a pure function because the failure mode is silent: get the
+// extension arithmetic wrong and a working image becomes a 404, with no error
+// anywhere. Returning null is always safe — the caller falls back to the
+// original key, so a wrong answer here can never lose an image, only fail to
+// find the optimised one.
+//
+// Two independent kill switches, because the .png conversion is deployed,
+// settled and serving traffic while the .jpeg one is new. One flag would mean
+// reverting the new path also silently reverts the working one.
+export function webpCandidate(key, env) {
+  const lower = key.toLowerCase();
+
+  // .jpeg and .jpg cannot collide: "x.jpeg".endsWith(".jpg") is false, since
+  // the final four characters are "jpeg", not ".jpg".
+  if (lower.endsWith(".png") && env.WEBP_FALLBACK === "true") {
+    return key.slice(0, -4) + ".webp";
+  }
+  if (
+    (lower.endsWith(".jpeg") || lower.endsWith(".jpg")) &&
+    env.WEBP_JPEG_FALLBACK === "true"
+  ) {
+    return key.slice(0, lower.endsWith(".jpeg") ? -5 : -4) + ".webp";
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // API proxying
 // ---------------------------------------------------------------------------
