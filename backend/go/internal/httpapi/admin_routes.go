@@ -33,25 +33,59 @@ func (s *Server) registerImageMutationRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE "+base+"images/{id}", s.handleDeleteImage)
 }
 
-// adminStatsResponse is the dashboard payload.
-//
-// The shape is GetAdminStatsDto: a block of totals plus a per-day series. The
-// frontend renders them as cards and a chart, so both halves are required.
-type adminStatsResponse struct {
-	TotalRequests int64            `json:"totalRequests"`
-	TotalImages   int64            `json:"totalImages"`
-	TotalTags     int64            `json:"totalTags"`
-	TotalArtists  int64            `json:"totalArtists"`
-	TotalUsers    int64            `json:"totalUsers"`
-	PendingTasks  int64            `json:"pendingTasks"`
-	OpenReports   int64            `json:"openReports"`
-	DailyStats    []dailyStatPoint `json:"dailyStats"`
+// adminUserStatDTO, adminUploaderStatDTO and adminAlbumUserStatDTO are the
+// leaderboard rows. Field names and order come from the reference service's
+// UserStatDto, UploaderStatDto and AlbumUserStatDto; the frontend indexes into
+// them by position.
+type adminUserStatDTO struct {
+	ID                 int64  `json:"id"`
+	Name               string `json:"name"`
+	RequestCount       int64  `json:"requestCount"`
+	APIKeyRequestCount int64  `json:"apiKeyRequestCount"`
+	JWTRequestCount    int64  `json:"jwtRequestCount"`
 }
 
-// dailyStatPoint is one day of request counts.
-type dailyStatPoint struct {
+type adminUploaderStatDTO struct {
+	ID                 int64  `json:"id"`
+	Name               string `json:"name"`
+	UploadedImageCount int64  `json:"uploadedImageCount"`
+}
+
+type adminAlbumUserStatDTO struct {
+	ID              int64  `json:"id"`
+	Name            string `json:"name"`
+	AlbumImageCount int64  `json:"albumImageCount"`
+}
+
+type adminDailyStatDTO struct {
 	Date  string `json:"date"`
 	Count int64  `json:"count"`
+}
+
+// adminStatsDTO is the GET /stats/admin response.
+//
+// Every field here is required by the dashboard. An earlier version returned a
+// different set - totalUsers, pendingTasks, openReports - so the page rendered
+// almost nothing and threw on requestsToday being undefined. The route and the
+// status code were both correct, which is why nothing caught it.
+type adminStatsDTO struct {
+	RequestsToday int64               `json:"requestsToday"`
+	History       []adminDailyStatDTO `json:"history"`
+
+	TopUsers       []adminUserStatDTO      `json:"topUsers"`
+	TopAPIKeyUsers []adminUserStatDTO      `json:"topApiKeyUsers"`
+	TopJWTUsers    []adminUserStatDTO      `json:"topJwtUsers"`
+	TopUploaders   []adminUploaderStatDTO  `json:"topUploaders"`
+	TopAlbumUsers  []adminAlbumUserStatDTO `json:"topAlbumUsers"`
+
+	TotalRequests                int64 `json:"totalRequests"`
+	TotalAuthenticatedRequests   int64 `json:"totalAuthenticatedRequests"`
+	TotalUnauthenticatedRequests int64 `json:"totalUnauthenticatedRequests"`
+	TotalAPIKeyRequests          int64 `json:"totalApiKeyRequests"`
+	TotalJWTRequests             int64 `json:"totalJwtRequests"`
+	TotalImages                  int64 `json:"totalImages"`
+	TotalTags                    int64 `json:"totalTags"`
+	TotalArtists                 int64 `json:"totalArtists"`
 }
 
 // handleAdminStats serves GET /stats/admin.
@@ -60,37 +94,74 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats, err := s.repo.GetAdminStats(r.Context())
+	d, err := s.repo.GetAdminDashboard(r.Context())
 	if err != nil {
 		s.logError(r, "admin stats", err)
 		internalServerError(w, r)
 		return
 	}
 
-	daily, err := s.repo.GetDailyStats(r.Context(), statsWindowDays)
-	if err != nil {
-		s.logError(r, "daily stats", err)
-		internalServerError(w, r)
-		return
+	// Every slice is allocated before it is filled so that an empty result
+	// serialises as [] rather than null. The frontend iterates these directly.
+	history := make([]adminDailyStatDTO, 0, len(d.History))
+	for _, p := range d.History {
+		history = append(history, adminDailyStatDTO{Date: p.Date, Count: p.Count})
 	}
 
-	points := make([]dailyStatPoint, 0, len(daily))
-	for _, day := range daily {
-		points = append(points, dailyStatPoint{
-			Date:  day.Date.Format("2006-01-02"),
-			Count: day.RequestCount,
+	topUsers := make([]adminUserStatDTO, 0, len(d.TopUsers))
+	for _, u := range d.TopUsers {
+		topUsers = append(topUsers, adminUserStatDTO{
+			ID: u.ID, Name: u.Name, RequestCount: u.RequestCount,
+			APIKeyRequestCount: u.APIKeyRequestCount, JWTRequestCount: u.JWTRequestCount,
 		})
 	}
 
-	writeJSON(w, http.StatusOK, adminStatsResponse{
-		TotalRequests: stats.TotalRequests,
-		TotalImages:   stats.TotalImages,
-		TotalTags:     stats.TotalTags,
-		TotalArtists:  stats.TotalArtists,
-		TotalUsers:    stats.TotalUsers,
-		PendingTasks:  stats.PendingTasks,
-		OpenReports:   stats.OpenReports,
-		DailyStats:    points,
+	topAPIKey := make([]adminUserStatDTO, 0, len(d.TopAPIKeyUsers))
+	for _, u := range d.TopAPIKeyUsers {
+		topAPIKey = append(topAPIKey, adminUserStatDTO{
+			ID: u.ID, Name: u.Name, RequestCount: u.RequestCount,
+			APIKeyRequestCount: u.APIKeyRequestCount, JWTRequestCount: u.JWTRequestCount,
+		})
+	}
+
+	topJWT := make([]adminUserStatDTO, 0, len(d.TopJWTUsers))
+	for _, u := range d.TopJWTUsers {
+		topJWT = append(topJWT, adminUserStatDTO{
+			ID: u.ID, Name: u.Name, RequestCount: u.RequestCount,
+			APIKeyRequestCount: u.APIKeyRequestCount, JWTRequestCount: u.JWTRequestCount,
+		})
+	}
+
+	topUploaders := make([]adminUploaderStatDTO, 0, len(d.TopUploaders))
+	for _, u := range d.TopUploaders {
+		topUploaders = append(topUploaders, adminUploaderStatDTO{
+			ID: u.ID, Name: u.Name, UploadedImageCount: u.UploadedImageCount,
+		})
+	}
+
+	topAlbum := make([]adminAlbumUserStatDTO, 0, len(d.TopAlbumUsers))
+	for _, u := range d.TopAlbumUsers {
+		topAlbum = append(topAlbum, adminAlbumUserStatDTO{
+			ID: u.ID, Name: u.Name, AlbumImageCount: u.AlbumImageCount,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, adminStatsDTO{
+		RequestsToday:                d.RequestsToday,
+		History:                      history,
+		TopUsers:                     topUsers,
+		TopAPIKeyUsers:               topAPIKey,
+		TopJWTUsers:                  topJWT,
+		TopUploaders:                 topUploaders,
+		TopAlbumUsers:                topAlbum,
+		TotalRequests:                d.TotalRequests,
+		TotalAuthenticatedRequests:   d.TotalAuthenticatedRequests,
+		TotalUnauthenticatedRequests: d.TotalUnauthenticatedRequests,
+		TotalAPIKeyRequests:          d.TotalAPIKeyRequests,
+		TotalJWTRequests:             d.TotalJWTRequests,
+		TotalImages:                  d.TotalImages,
+		TotalTags:                    d.TotalTags,
+		TotalArtists:                 d.TotalArtists,
 	})
 }
 
