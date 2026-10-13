@@ -1,5 +1,6 @@
 import os
 import logging
+import math
 import asyncio
 import random
 import time
@@ -132,6 +133,7 @@ STATS = {
     "artists": None,         # /stats/public totalArtists
     "served": 0,             # images this process has posted
     "last_id": None,         # ID of the most recent image posted
+    "last_served_at": None,  # monotonic, or None if nothing has been served
     "errors": 0,             # failed API calls since start
     "last_error_at": None,   # monotonic, or None if nothing has failed yet
 }
@@ -149,6 +151,7 @@ def note_error():
 def note_served(img):
     STATS["served"] += 1
     STATS["last_id"] = img.get("id")
+    STATS["last_served_at"] = time.monotonic()
 
 
 async def api_get(path, *, base=None, timeout=None, **params):
@@ -397,6 +400,47 @@ async def on_disconnect():
     pass
 
 
+# Cooldowns are the expected case, not a fault.
+#
+# discord.py raises CommandOnCooldown and, with no handler, the default
+# on_command_error logs the full traceback. Three commands carry a cooldown and
+# the cooldown is 10-15 seconds, so a user double-tapping !waifu produced a
+# multi-line stack trace in the console for behaviour that is working exactly as
+# intended. The user got silence; the operator got noise, inverted from what
+# either of them wanted.
+#
+# Only genuine faults still get logged with a traceback, which is the point:
+# an error handler that swallows everything would hide the next real bug.
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandOnCooldown):
+        # Rounded up, deliberately. human_duration truncates, so a real wait of
+        # 14.6s would be reported as "14s" and the user would retry half a
+        # second early and be cooled down again - the message would be causing
+        # the very thing it is warning about. Ceiling also turns a sub-second
+        # remainder such as 0.13s into 1s rather than the "0s" truncation
+        # produces, which would tell them the wait is over while it is not.
+        wait = human_duration(math.ceil(error.retry_after))
+        await ctx.reply(f"slow down — try again in {wait}" if wait != "0s"
+                        else "slow down — one moment")
+        return
+
+    # A mistyped prefix is nobody's fault and needs no reply, only no traceback.
+    if isinstance(error, commands.CommandNotFound):
+        return
+
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.reply("you don't have permission to use that here.")
+        return
+
+    if isinstance(error, commands.BotMissingPermissions):
+        await ctx.reply("i'm missing permissions to do that.")
+        return
+
+    log.error("command %s failed: %r", getattr(ctx.command, "name", "?"), error,
+              exc_info=(type(error), error, error.__traceback__))
+
+
 @bot.event
 async def on_ready():
     global session
@@ -430,6 +474,18 @@ STATUS_ROTATION = [
     None,  # uptime and errors
     (discord.ActivityType.competing, "PNG vs WebP, and the winner is WebP"),
     (discord.ActivityType.listening, "C should have gone in the tags"),
+    None,  # most recently served image
+    (discord.ActivityType.watching, "signed GETs, one at a time"),
+    (discord.ActivityType.competing, "edge cache vs Render cold start"),
+    (discord.ActivityType.listening, "png in, webp out, nobody notices"),
+    (discord.ActivityType.playing, "a tag is a promise"),
+    (discord.ActivityType.competing, "case-sensitive vs case-insensitive"),
+    (discord.ActivityType.watching, "SIGV4, hand-rolled, no SDK"),
+    (discord.ActivityType.listening, "the render farm that never was"),
+    (discord.ActivityType.playing, "Hamming distance, going by feel"),
+    (discord.ActivityType.watching, "waiting out a 60 second cache TTL"),
+    (discord.ActivityType.competing, "ObjectKeyCandidates vs {id}{ext}"),
+    (discord.ActivityType.listening, "pgvector, doing its honest best"),
 ]
 
 # Spare lines, used when a live slot has nothing to say yet.
@@ -441,6 +497,9 @@ FALLBACK_STATUSES = [
     (discord.ActivityType.listening, "the sound of a cold start"),
     (discord.ActivityType.competing, "your browser's connection pool"),
     (discord.ActivityType.watching, "the Cloudflare edge, probably"),
+    (discord.ActivityType.competing, "the upload queue, politely"),
+    (discord.ActivityType.listening, "nobody is watching this, only me"),
+    (discord.ActivityType.playing, "counting tags, badly"),
 ]
 
 # Status lines that react to the last command used. This is what makes the
@@ -536,16 +595,49 @@ def service_status():
     return (discord.ActivityType.listening, f"up {uptime}, waiting to be useful")
 
 
-LIVE_STATUSES = {0: latency_status, 2: catalogue_status, 5: service_status}
+def last_served_status():
+    """The most recent image handed out, and when.
+
+    The only slot that moves on its own rather than on a timer, which is what
+    makes the presence look awake between commands. Freshness is reported
+    because a stale "latest #4028" with no timestamp reads as a live one, and a
+    bot claiming to have just served something when it served it four hours ago
+    is worse than saying nothing.
+    """
+    last_id = STATS["last_id"]
+    served_at = STATS["last_served_at"]
+    if last_id is None or served_at is None:
+        return None
+
+    served = STATS["served"]
+    ago = human_duration(time.monotonic() - served_at)
+    if ago != "0s":
+        return (discord.ActivityType.listening, f"last served #{last_id}, {ago} ago")
+
+    if served == 1:
+        return (discord.ActivityType.playing, "one image down and counting")
+    return (discord.ActivityType.playing, f"{served:,} served, newest #{last_id}")
+
+
+LIVE_STATUSES = {
+    0: latency_status,
+    2: catalogue_status,
+    5: service_status,
+    8: last_served_status,
+}
 
 
 def current_status(slot):
     """Return the (type, name) to show for this slot of the rotation.
 
-    Slots 0, 2 and 5 read numbers from STATS; slot 3 reacts to the last command;
-    the rest are fixed lines. A live slot with nothing to report falls back to a
-    spare line, so the status never depends on the API being up or on someone
-    having typed a command.
+    Slots 0, 2, 5 and 8 read numbers from STATS; slot 3 reacts to the last
+    command; the rest are fixed lines. A live slot with nothing to report falls
+    back to a spare line, so the status never depends on the API being up or on
+    someone having typed a command.
+
+    Slot numbers are load-bearing - they are the keys of LIVE_STATUSES - so new
+    live slots are appended rather than inserted, and anything that renumbers
+    the list silently reassigns which function feeds which line.
     """
     slot %= len(STATUS_ROTATION)
 
