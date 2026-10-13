@@ -185,3 +185,21 @@ untouched.
 
 If a connection failure ever reports `user=nonroot` or a socket path, this is
 why — not an unreachable database.
+
+### The Go service has no route-sweep blind spot left on CORS
+
+`withCORS` was missing entirely from the first cutover and took the site down.
+The C# service used `UseCors("AllowAll")` — any origin, any method, any header —
+and the port dropped it.
+
+The failure is hard to diagnose from the symptoms, because it looks like a
+network problem rather than a missing header. Browsers refuse to read a
+cross-origin response that carries no `Access-Control-Allow-Origin`, and a
+preflight for anything with an `Authorization` header or a JSON body got a
+**405**, because Go's mux matches a method exactly and no OPTIONS route was
+registered. So the frontend saw a blocked request *and* an outright rejection,
+for everything, while `curl` worked perfectly.
+
+It is invisible to `routecheck` and to a 59-endpoint sweep, because a route is a
+path and a method and CORS is a **header**. A route sweep will never catch this.
+Header behaviour needs its own tests, which is what `cors_test.go` is.

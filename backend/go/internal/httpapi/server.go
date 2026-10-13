@@ -195,8 +195,12 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 //	counting       increments the usage counters, and therefore must run after
 //	               authentication — it records which credential was used
 func (s *Server) Handler(mux *http.ServeMux, authenticator *auth.Authenticator, lookup auth.UserLookup) http.Handler {
+	// Outermost after recovery: a preflight must be answered even when the
+	// request would have been rejected downstream, and the response headers have
+	// to be present on every response including error responses.
 	return chain(mux,
 		withRecovery(s.log),
+		withCORS(),
 		withMaxBodySize(s.cfg.MaxUploadSizeBytes),
 		withRequestTimeout(defaultRequestTimeout),
 		withLogging(s.log),

@@ -146,3 +146,41 @@ type Logger interface {
 	Info(msg string, args ...any)
 	Error(msg string, args ...any)
 }
+
+// withCORS mirrors the C# service's "AllowAll" policy: any origin, any method,
+// any header.
+//
+// This was missing entirely on the first cutover and it took the site down. The
+// failure looked like a network problem rather than a missing feature — browsers
+// refuse to read a cross-origin response that carries no
+// Access-Control-Allow-Origin — and a preflight for anything with an
+// Authorization header or a JSON body got a 405 because Go's mux matches a
+// method exactly. So the frontend saw both a missing header and an outright
+// rejection, for every request.
+//
+// It also does not show up in a route sweep, because a route is a path and a
+// method. Headers are invisible to that kind of check, and the C# side setting
+// did not throw on startup when it was forgotten.
+func withCORS() middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := w.Header()
+			header.Set("Access-Control-Allow-Origin", "*")
+			header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
+			header.Set("Access-Control-Allow-Headers", "*")
+			// Without this a browser cannot read a response header such as
+			// Location from a script, even though the request itself is allowed.
+			header.Set("Access-Control-Expose-Headers", "Location, Content-Type")
+
+			// The preflight never reaches a route, because the mux only matches
+			// the methods that were registered. Answering it here is the whole
+			// reason the site worked.
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
