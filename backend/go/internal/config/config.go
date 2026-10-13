@@ -20,6 +20,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -486,7 +487,11 @@ func Load(l *Loader) (*Config, error) {
 
 	cfg.Port = l.optionalIntOrAccumulate("PORT", 8080, &missing)
 	cfg.BasePath = normalizeBasePath(l.get("API_BASE_PATH"))
-	cfg.DatabaseURL = l.require("ConnectionStrings__DefaultConnection", &missing)
+	databaseURL, err := normalizeConnectionString(l.require("ConnectionStrings__DefaultConnection", &missing))
+	if err != nil {
+		missing = append(missing, err.Error())
+	}
+	cfg.DatabaseURL = databaseURL
 
 	// Upload size is expressed in megabytes in configuration, matching the
 	// Image__MaxUploadSizeMb variable the .NET service uses.
@@ -796,4 +801,130 @@ func (c *Config) BasePathOrRoot() string {
 		return "/"
 	}
 	return c.BasePath
+}
+
+// normalizeConnectionString makes the configured connection string usable by
+// pgx, whichever format it arrived in.
+//
+// Render's ConnectionStrings__DefaultConnection is in Npgsql's keyword/value
+// form with semicolon separators, because that is what the .NET service reads
+// and what scripts/mirror/mkconn.py emits:
+//
+//	Host=db.example;Port=5432;Database=postgres;Username=u;Password=p
+//
+// pgx does not accept that. Its ParseConfig understands either a postgres://
+// URL or space-separated key=value pairs, so a semicolon-separated string
+// parses to nothing and every field silently falls back to its default — the
+// OS user, a blank database, and a Unix socket. The failure looks like the
+// database being unreachable rather than like a format problem, which is why
+// it is worth converting explicitly and loudly.
+//
+// A value containing "://" is already a URL and is returned untouched.
+func normalizeConnectionString(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("connection string is empty")
+	}
+	if strings.Contains(trimmed, "://") {
+		return trimmed, nil
+	}
+
+	// Npgsql key names mapped onto the ones pgx expects. Unlisted keys are
+	// dropped: passing an unknown keyword to pgx is itself an error, and the
+	// connection string is not the place to fail on an unfamiliar option.
+	rename := map[string]string{
+		"host":                   "host",
+		"port":                   "port",
+		"database":               "dbname",
+		"dbname":                 "dbname",
+		"username":               "user",
+		"user":                   "user",
+		"password":               "password",
+		"applicationname":        "application_name",
+		"search_path":            "search_path",
+		"timeout":                "connect_timeout",
+		"commandtimeout":         "statement_timeout",
+		"connectiontimeout":      "connect_timeout",
+		"sslmode":                "sslmode",
+		"sslfactory":             "",
+		"trustservercertificate": "sslmode",
+		"enlist":                 "",
+		"application name":       "application_name",
+	}
+
+	var out []string
+	seen := make(map[string]bool)
+
+	for _, field := range strings.Split(trimmed, ";") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(field, "=")
+		if !ok {
+			// An unparseable field is dropped rather than guessed at, but only
+			// after the ones that do parse have been kept.
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(name))
+		key = strings.ReplaceAll(key, " ", "")
+
+		pgxKey, known := rename[key]
+		if !known || pgxKey == "" {
+			continue
+		}
+		// Last one wins, matching Npgsql's own behaviour for a repeated key.
+		if seen[pgxKey] {
+			for i, existing := range out {
+				if strings.HasPrefix(existing, pgxKey+"=") {
+					out[i] = pgxKey + "=" + quotePgxValue(strings.TrimSpace(value))
+				}
+			}
+			continue
+		}
+		// Npgsql's enum values are case-insensitive and mkconn.py writes
+		// "SSL Mode=Require"; pgx requires lowercase and rejects "Require"
+		// outright, which would fail the parse rather than degrade.
+		if pgxKey == "sslmode" {
+			value = strings.ToLower(strings.TrimSpace(value))
+		}
+
+		seen[pgxKey] = true
+		out = append(out, pgxKey+"="+quotePgxValue(strings.TrimSpace(value)))
+	}
+
+	if len(out) == 0 {
+		return "", fmt.Errorf("connection string has no recognisable fields: %q", raw)
+	}
+	// pgx reads this instead of contacting a Unix socket, which is what made
+	// the misparse look like an unreachable database.
+	if !seen["host"] {
+		out = append([]string{"host=localhost"}, out...)
+	}
+	return strings.Join(out, " "), nil
+}
+
+// quotePgxValue wraps a value in single quotes when it contains anything that
+// would otherwise split the keyword/value pair, so a password with spaces or
+// semicolons in it survives the round trip.
+func quotePgxValue(value string) string {
+	// Percent-decode first. scripts/mirror/mkconn.py emits
+	// Password=quote(password, safe=''), so the value on Render is escaped and
+	// Npgsql unescapes it when it connects. pgx does not, so passing it through
+	// unchanged would authenticate with the encoded string and fail. A value
+	// that is not valid percent-encoding is left alone, which is the right
+	// default: a literal "%" in a password is likelier than a broken escape.
+	if decoded, err := url.PathUnescape(value); err == nil {
+		value = decoded
+	}
+
+	if value == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(value, " '\\") {
+		return value
+	}
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
+	return "'" + escaped + "'"
 }

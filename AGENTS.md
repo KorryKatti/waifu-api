@@ -156,3 +156,32 @@ decided by whichever machine computed them. Consequences worth remembering:
 - Reconcile totals from independent sources (dashboard, live API, object
   store) before declaring a migration complete — that is how six missing images
   surfaced.
+
+### Render's connection string is Npgsql format, not a URL
+
+`ConnectionStrings__DefaultConnection` on Render is keyword/value with
+**semicolon** separators, because that is what the .NET service reads and what
+`scripts/mirror/mkconn.py` prints for pasting into the dashboard:
+
+```
+Host=db.example;Port=5432;Database=postgres;Username=u;Password=p%40ss;SSL Mode=Require
+```
+
+pgx does not accept that. `ParseConfig` understands a `postgres://` URL or
+space-separated pairs, so a semicolon-separated string parses to *nothing* and
+every field falls back to its default — the OS user, a blank database, and a
+Unix socket at `/tmp`. The error that comes out says the database is
+unreachable, not that the format is wrong:
+
+```
+failed to connect to `user=nonroot database=`: /tmp/.s.PGSQL.5432 ... no such file or directory
+```
+
+`internal/config.normalizeConnectionString` converts it, and handles three
+things the obvious implementation misses: the password is percent-encoded by
+`mkconn.py` and Npgsql decodes it, `SSL Mode` has a space in the key, and
+`SSL Mode=Require` has a capital R that pgx rejects outright. URLs pass through
+untouched.
+
+If a connection failure ever reports `user=nonroot` or a socket path, this is
+why — not an unreachable database.
