@@ -114,25 +114,64 @@ func (s *Server) Register(mux *http.ServeMux) {
 	s.registerStatsRoutes(mux)
 }
 
-// handleHealthz reports process and database liveness.
+// handleHealthz reports liveness plus the runtime numbers an operator wants
+// first when a deployed service misbehaves.
 //
-// It returns 503 when the database is unreachable so an orchestrator can act
-// on it, which is more useful than reporting a healthy process that cannot
-// serve traffic.
+// It returns 503 when the database is unreachable so an orchestrator can act on
+// it, which is more useful than reporting a healthy process that cannot serve
+// traffic. The same failure is also described in the body, because a 503 with
+// nothing in it is hard to diagnose from a log.
+//
+// /ping deliberately does NOT carry these numbers. It is the liveness probe:
+// C# returns text/plain "pong", a monitor may grep the body for that word, and
+// bot/bot.py documents that decoding its response as JSON would turn a healthy
+// API into an error. The two endpoints have different jobs - /ping answers "is
+// the process up" in the cheapest possible way, /healthz answers "what is it
+// doing".
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.withTimeout(r)
 	defer cancel()
+
+	body := map[string]any{
+		"status":  "ok",
+		"build":   buildInfo(),
+		"runtime": runtimeStats(),
+		"system":  systemStats(),
+	}
 
 	if s.db != nil {
 		if err := s.db.Ping(ctx); err != nil {
 			apierror.Internal("database is unreachable").Write(w, r.URL.Path)
 			return
 		}
+		if stats := s.db.Stats(); stats != nil {
+			body["database"] = map[string]any{
+				"reachable":            true,
+				"totalConns":           stats.TotalConns(),
+				"idleConns":            stats.IdleConns(),
+				"acquiredConns":        stats.AcquiredConns(),
+				"maxConns":             stats.MaxConns(),
+				"newConnsCount":        stats.NewConnsCount(),
+				"acquireCount":         stats.AcquireCount(),
+				"emptyAcquireCount":    stats.EmptyAcquireCount(),
+				"canceledAcquireCount": stats.CanceledAcquireCount(),
+				"acquireDurationMs":    stats.AcquireDuration().Milliseconds(),
+			}
+		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-	})
+	// Configuration, not secrets: which bucket and provider, and whether the
+	// path-style addressing that MinIO and R2 need is on. Enough to explain
+	// "why is nothing being served" without exposing a credential.
+	if s.cfg != nil {
+		body["storage"] = map[string]any{
+			"provider":       string(s.cfg.S3.Provider),
+			"bucket":         s.cfg.S3.BucketName,
+			"forcePathStyle": s.cfg.S3.ForcePathStyle,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handlePing is the liveness probe.

@@ -48,6 +48,10 @@ func main() {
 // can return an error rather than calling os.Exit, which defers would otherwise
 // skip.
 func run() error {
+	// Uptime is measured from here rather than from package init, so the clock
+	// starts when the service actually begins rather than when it is linked.
+	httpapi.MarkStarted(time.Now())
+
 	// ---- Configuration -------------------------------------------------
 	cfg, err := config.Load(config.NewLoader())
 	if err != nil {
