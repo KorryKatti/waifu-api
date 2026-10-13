@@ -105,6 +105,38 @@ Reconciliation code is destructive-adjacent. When it disagrees with reality,
 believe it over the database until a probe proves otherwise, and never click
 delete on a list whose construction you have not read.
 
+### Query parameter names are case-insensitive, and must stay that way
+
+The C# service bound `[FromQuery]` models, and ASP.NET matches query names
+case-insensitively. `url.Values.Get` in Go is an exact map lookup, so the port
+made every parameter silently case-sensitive on the day it landed.
+
+Nothing errors on an unrecognised parameter, which is why it survived a full
+route sweep and went unnoticed. Callers got **valid, complete, wrong answers**:
+
+- `PageSize=5` ignored, default page size used. `!gallery` got one image, so its
+  Prev/Next buttons could not move — `(index+1) % 1` is always 0 — and Discord
+  still reported the edit as successful.
+- `IncludedTags` ignored, so a caller filtering to one tag got the whole
+  catalogue.
+- `IsNsfw=True` ignored, so NSFW requests returned SFW results.
+
+Query reads go through `queryParam`, which tries the exact spelling then falls
+back to a case-insensitive scan; `stringListParam` does the same. **Values are
+never lowercased** — `reviewStatus=Accepted` is an enum value.
+
+Two traps worth remembering:
+
+**Do not "fix" this with a middleware** that lowercases parameter names on the
+way in. It looks tidier — one place, no call sites — and it breaks everything,
+because the code reads `query.Get("pageSize")` while the key has become
+`"pagesize"`. Normalising at the point of use is the version that cannot be
+forgotten.
+
+**Parity sweeps cannot catch this class of bug.** They call both backends with
+identical casing, so both honour the same names and agree perfectly — on inputs
+nobody sends. To catch a divergence, sweep with **mixed casing** on both sides.
+
 ### Duplicate detection has never worked, on any implementation
 
 The C# hashes do not reproduce themselves, and v6 — which was Go — had no

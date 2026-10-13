@@ -263,7 +263,11 @@ async def waifu(ctx, *, query: str = ""):
         params["orientation"] = orientation.capitalize()
 
     if parts:
-        params["includedTags"] = "-".join(parts)
+        # Comma, not a dash: the API splits this parameter on commas, so a
+        # dash-joined "ayaka-swimsu" arrives as one tag that matches nothing and
+        # the user gets "No images matched that search". Invisible until the
+        # parameter stopped being silently dropped.
+        params["includedTags"] = ",".join(parts)
 
     async with ctx.typing():
         try:
