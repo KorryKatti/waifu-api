@@ -22,23 +22,28 @@ docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet 
 There is no local `dotnet`; use the SDK container. It is the same SDK Render
 builds with.
 
-## The Go rewrite: validated, not deployed
+## The Go rewrite: validated, merged, not yet deployed
 
-`backend/go` is a complete, tested replacement for the C# service. **It is not
-running in production and must not be.** The owner has decided this explicitly.
+`backend/go` is a complete, tested replacement for the C# service. It is on
+`main`. **Production still runs the C# service**, and deploying Go is an
+outstanding step, not a completed one.
 
-- `docker-compose.yml`, `.github/workflows/docker-image.yml` and Render all
-  still point at the C# service, and that is correct. Do not repoint them.
+- `docker-compose.yml`, `.github/workflows/docker-image.yml` and Render still
+  point at the C# service. **There is no workflow that publishes a Go image**,
+  so nothing to point at yet.
 - The C# service stays deployed and must keep building in Release. It is the
-  behavioural oracle the Go tests compare against, so removing it removes the
-  thing that makes the rewrite trustworthy.
-- What *is* safe to run against production is the one-off fingerprint backfill,
-  in order: migration, then `tools/legacyload`, then `tools/backfill`. Those
-  touch the database only, and `tools/backfill` refuses to write until the
-  legacy column is populated.
+  behavioural oracle the Go tests compare against, and the source the one-time
+  fingerprint migration ran against. Removing it removes both.
+- Deploying means: publish a Go image, repoint `docker-compose.yml`, repoint
+  Render. The code itself needs nothing further.
+- The fingerprint migration is **done**. `PerceptualHash` holds Go hashes on all
+  4,287 rows; `PerceptualHashLegacy` holds the original C# values as the undo.
+  Run in order: migration (done), `tools/legacyload` (done), `tools/backfill`
+  (done). Until the cutover, **C# duplicate detection is 0%** — a Go-written
+  column is not comparable to a C#-computed one. Nothing else is affected.
 
-Full record, including two bugs this found and how they were measured:
-`plans/cutover-validation-log.md`. Plan and reasoning:
+Full record, including two production bugs this found and how they were
+measured: `plans/cutover-validation-log.md`. Plan and reasoning:
 `backend/go/internal/images/phash/MIGRATION.md`.
 
 ### Never point the Go service at the production database
@@ -46,6 +51,19 @@ Full record, including two bugs this found and how they were measured:
 `background.runJob` runs each cleanup job **once at startup**, before its daily
 ticker, matching the C# behaviour. `StatsCleanup` is unconditional and issues
 `DeleteDailyStatsBefore`. Booting Go against production deletes rows immediately.
+
+### PNGs are stored as WebP
+
+Every PNG is converted at upload and served back at its `.png` path by the
+Worker. `Image.Extension` is still `.png`, so a plain `{id}{ext}` fetch misses
+all 1,162 PNG rows and reports them absent. Use `storage.ObjectKeyCandidates`
+rather than constructing the key yourself.
+
+### Duplicate detection has never worked, on any implementation
+
+The C# hashes do not reproduce themselves, and v6 — which was Go — had no
+duplicate detection at all. The threshold of `4` was chosen against an algorithm
+that never existed consistently. Re-tune it from the real distribution.
 
 ### Known licensing trap
 
