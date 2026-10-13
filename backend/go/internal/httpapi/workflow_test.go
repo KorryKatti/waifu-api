@@ -422,16 +422,18 @@ func seedPendingTask(t *testing.T, h *harness, submitterID int64) {
 	// prepared statement.
 	if _, err := h.db.Pool().Exec(ctx, `
         INSERT INTO "Images" ("Width","Height","ByteSize","Extension","DominantColor",
-                              "IsNsfw","IsAnimated","PerceptualHash","ReviewStatus","UploaderId")
+                              "IsNsfw","IsAnimated","PerceptualHash","ReviewStatus","UploaderId","UploadedAt")
         VALUES (100,100,1,'.png','#000000',false,false,
-                B'0000000000000000000000000000000000000000000000000000000000000000', 0, $1)`,
+                B'0000000000000000000000000000000000000000000000000000000000000000', 0, $1, now())`,
 		submitterID); err != nil {
 		t.Fatalf("seed image: %v", err)
 	}
 
 	if _, err := h.db.Pool().Exec(ctx, `
-        INSERT INTO "ReviewTasks" ("Kind","TargetType","TargetId","SubmitterId","Status")
-        VALUES (0, 0, (SELECT MAX("Id") FROM "Images"), $1, 0)`,
+        INSERT INTO "ReviewTasks" ("Kind","TargetType","TargetId","SubmitterId","Status",
+                                    "Payload", "Reason", "ReviewerNote", "CreatedAt")
+        VALUES (0, 0, (SELECT MAX("Id") FROM "Images"), $1, 0,
+                '{}'::jsonb, '', '', now())`,
 		submitterID); err != nil {
 		t.Fatalf("seed review task: %v", err)
 	}

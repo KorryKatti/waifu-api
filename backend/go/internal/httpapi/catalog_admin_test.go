@@ -359,9 +359,9 @@ func seedAcceptedImage(t *testing.T, h *harness) int {
 	var id int
 	err := h.db.Pool().QueryRow(ctx, `
         INSERT INTO "Images" ("Width","Height","ByteSize","Extension","DominantColor",
-                              "IsNsfw","IsAnimated","PerceptualHash","ReviewStatus")
+                              "IsNsfw","IsAnimated","PerceptualHash","ReviewStatus","UploadedAt")
         VALUES (640,480,2048,'.png','#123456',false,false,
-                repeat('0', 64)::bit(64), 1)
+                repeat('0', 64)::bit(64), 1, now())
         RETURNING "Id"`).Scan(&id)
 	if err != nil {
 		t.Fatalf("seed image: %v", err)

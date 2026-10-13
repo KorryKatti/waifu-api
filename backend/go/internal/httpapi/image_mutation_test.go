@@ -503,8 +503,9 @@ func TestImagePatchAcceptingClosesTheReviewTask(t *testing.T) {
 	defer cancel()
 
 	if _, err := h.db.Pool().Exec(ctx, `
-        INSERT INTO "ReviewTasks" ("Kind", "TargetType", "TargetId", "SubmitterId")
-        VALUES (0, 0, $1, 51)`, imageID); err != nil {
+        INSERT INTO "ReviewTasks" ("Kind", "TargetType", "TargetId", "SubmitterId",
+                                    "Payload", "Reason", "ReviewerNote", "Status", "CreatedAt")
+        VALUES (0, 0, $1, 51, '{}'::jsonb, '', '', 0, now())`, imageID); err != nil {
 		t.Fatalf("seed review task: %v", err)
 	}
 

@@ -301,8 +301,9 @@ func seedReviewBypass(t *testing.T, db *store.DB, count int) {
 
 	for i := 1; i <= count; i++ {
 		_, err := db.Pool().Exec(ctx, `
-            INSERT INTO "Users" ("Id", "DiscordId", "Name", "Role")
-            VALUES ($1, $2, $3, 0)
+            INSERT INTO "Users" ("Id", "DiscordId", "Name", "Role",
+                             "IsBlacklisted", "RequestCount", "JwtRequestCount", "ApiKeyRequestCount")
+            VALUES ($1, $2, $3, 0, false, 0, 0, 0)
             ON CONFLICT ("Id") DO NOTHING`,
 			i, fmt.Sprintf("discord-%d", i), fmt.Sprintf("user-%d", i))
 		if err != nil {

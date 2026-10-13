@@ -26,8 +26,9 @@ func seedUsers(t *testing.T, h *harness, roles ...config.Role) []int64 {
 	for i, role := range roles {
 		id := int64(1000 + i)
 		_, err := h.db.Pool().Exec(ctx, `
-            INSERT INTO "Users" ("Id", "DiscordId", "Name", "Role")
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO "Users" ("Id", "DiscordId", "Name", "Role",
+                             "IsBlacklisted", "RequestCount", "JwtRequestCount", "ApiKeyRequestCount")
+            VALUES ($1, $2, $3, $4, false, 0, 0, 0)
             ON CONFLICT ("Id") DO NOTHING`,
 			id, fmt.Sprintf("discord-seed-%d", i), fmt.Sprintf("seeded-%d", i), int(role))
 		if err != nil {
@@ -240,9 +241,9 @@ func TestUserCountsAreReportedPerUser(t *testing.T) {
 	_, err := h.db.Pool().Exec(context.Background(), `
         INSERT INTO "Images" ("Id", "PerceptualHash", "Extension", "DominantColor",
                                "IsNsfw", "IsAnimated", "Width", "Height", "ByteSize",
-                               "UploaderId", "ReviewStatus")
+                               "UploaderId", "ReviewStatus", "UploadedAt")
         VALUES ($1, B'0000000000000000000000000000000000000000000000000000000000000000',
-                '.png', '#000000', false, false, 800, 1000, 1000, $2, 1)`,
+                '.png', '#000000', false, false, 800, 1000, 1000, $2, 1, now())`,
 		imageID, userID)
 	if err != nil {
 		t.Fatalf("seed image: %v", err)
