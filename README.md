@@ -7,7 +7,7 @@
 
   <p>
     <strong>The versatile waifu image provider.</strong><br>
-    Access a curated archive of over 4000 anime-style images with powerful filtering.
+    Access a curated archive of over 4,200 anime-style images with powerful filtering.
   </p>
 
   <p>
@@ -19,7 +19,7 @@
 
   <p>
     <a href="https://stats.uptimerobot.com/AbgWCVWsKT"><img src="https://img.shields.io/badge/instance-live-22c55e?style=flat-square" alt="Instance status"></a>
-    <img src="https://img.shields.io/github/license/waifu-im/waifu-api?style=flat-square&color=5865F2" alt="License">
+    <img src="https://img.shields.io/github/license/KorryKatti/waifu-api?style=flat-square&color=5865F2" alt="License">
     <img src="https://img.shields.io/badge/Docker-Ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
   </p>
 </div>
@@ -42,181 +42,136 @@
 | Uploads | Open — requires a Discord login; new images go to a review queue |
 | Users | Discord OAuth works; existing accounts did not carry over |
 
-Image URLs are served through a Cloudflare Worker in front of a private object
-store, so `Cdn__BaseUrl` points at the Worker rather than at storage directly.
-Response shapes are unchanged.
+## ⚡ Which host should you use?
+
+Pick this deliberately — the two hosts are not interchangeable.
+
+| What you're doing | Point it at |
+|---|---|
+| Fetching images (`GET /images`, `/images/sfw`, …) | **CDN** — `https://waifu-cdn.waifu-api.workers.dev` |
+| Anything authenticated with an API key | **API** — `https://waifu-api-031n.onrender.com` |
+| Anything authenticated with a Bearer token | Either; the Worker forwards `Authorization` |
+
+**The Worker strips the `X-Api-Key` header.** It only forwards `Authorization`,
+`Accept` and `Accept-Language`. An API-key client pointed at the Worker is
+silently unauthenticated and gets a `401`. The API host is the only one that
+passes every credential through.
+
+For anonymous reads the Worker is the faster host: it proxies to the API host
+and caches for 60 seconds, so a page load's `/images` + `/tags` + `/stats` is one
+edge read instead of three database round trips. The API host is responsive in
+its own right — the caching is the advantage, not a workaround for a sleeping
+backend. Anonymous reads are browser-reachable too, because the Worker sets
+`access-control-allow-origin: *` on its own responses.
+
+### Expect a slow first image
+
+Images are served through the Worker, which caches per data centre.
+
+- **Warm** (~0.5s): cached at the edge, near-instant, repeat visits.
+- **Cold** (~2–4s): the first fetch of an image from a given region streams
+  straight through from object storage.
+
+The cache is global in the sense that every Cloudflare data centre caches
+independently, so the second load of any image is fast — but there is no tiered
+cache and concurrent misses are not collapsed, so a first-time visitor browsing
+uncached images pays the full fetch each time. Warm it up and it settles.
 
 ## ✨ Features
 
-Waifu.im provides a robust REST API designed for ease of use and flexibility.
-
-- 🖼️ **Extensive Archive**: Over 4000 high-quality images.
-- 🏷️ **Tag-Based Search**: Filter by specific character tags, styles, or themes.
+- 🖼️ **Extensive Archive**: 4,287 images and counting.
+- 🏷️ **Tag-Based Search**: Filter by character tags, styles, or themes.
 - 📁 **Albums**: Organize and share collections of images.
-- 👯 **Duplicate Detection**: Automatic detection of duplicate images to maintain quality.
-- 🔍 **Advanced Filtering**:
-  - Filter by orientation (Landscape/Portrait)
-  - Filter by resolution (width/height) and file size
-  - Toggle NSFW/Adult content
-  - Include/Exclude GIFs
-  - Filter by specific Artists
-  - Exclude specific files
-  - Force inclusion of specific files
-- 👤 **User Accounts**: Discord-based authentication to manage favorites and albums.
-- 🛡️ **Moderation Tools**: Report system and review queues for community safety.
-- ⚡ **Performance**: Optimized for speed with caching and CDN integration.
-- 🎛️ **Playground**: Try filter combinations in the browser and see results immediately.
-- 🤖 **Discord Bot**: A sample bot showing how to use the API from chat commands.
-- 📊 **Statistics**: Track API usage and popular tags.
-- 🎲 **Flexible Sorting**: Sort by date, popularity, or get random results.
+- 👯 **Duplicate Detection**: Perceptual hashing catches re-uploads automatically.
+- 🔍 **Advanced Filtering**: orientation, resolution, file size, NSFW, GIFs,
+  artists, and explicit include/exclude by file.
+- 👤 **User Accounts**: Discord-based auth for favourites and albums.
+- 🛡️ **Moderation Tools**: Report system and review queues.
+- 🤖 **Discord Bot**: A working sample bot in [`bot/`](bot/).
+- 📊 **Statistics**: Usage and popular tags.
+- 🎲 **Flexible Sorting**: By date, popularity, or random.
 
-## 🚀 Getting Started
+## 🚀 Getting started
 
-Deploy your own instance of the Waifu.im API using Docker. See
-[`scripts/mirror/`](scripts/mirror/) for tooling that imports a database export
-and mirrors an image archive into any S3-compatible bucket.
+```bash
+git clone https://github.com/KorryKatti/waifu-api.git
+cd waifu-api
+cp .env.example .env      # fill in Discord + storage credentials
+docker-compose up -d
+```
 
-A Discord bot lives in [`bot/`](bot/): random images, tag and orientation
-filters, and an NSFW channel gate. It talks to the Cloudflare Worker rather
-than the API host, so repeat commands are answered from the edge cache instead
-of the database. See [`bot/README.md`](bot/README.md).
+That runs the Go backend, the frontend, and Postgres with pgvector. The
+frontend builds against `VITE_API_URL`, and Discord needs its redirect URI
+registered as `https://<your-frontend>/auth/callback`.
 
-#### Which host should your bot use?
+For active development, run the database in Docker and the services natively:
 
-This is the same trade-off the frontend makes, and it is worth picking
-deliberately:
+```bash
+docker-compose -f docker-compose.dev.yml up -d   # Postgres + Adminer
 
-| What your bot does | Point it at |
+cd backend/go && go run ./cmd/server               # API on :8080
+cd frontend && npm install && npm run dev         # UI on :5173
+```
+
+## 🏗️ Backends
+
+There are two, and only one of them is the product.
+
+| | |
 |---|---|
-| Fetches images (`GET /images`, `/images/sfw`, ...) | `https://waifu-cdn.waifu-api.workers.dev` — edge-cached, and image bytes never touch Render |
-| Anything authenticated | `https://waifu-api-031n.onrender.com` — read below first |
+| **`backend/go`** | The service. This is what `docker-compose.yml` builds and what production runs. |
+| **`backend/WaifuApi.*`** | The C# original, kept as a **behavioural oracle**. The Go test suite compares against it. Not deployed, not maintained. |
 
-For anonymous reads the Worker is the faster host, because a repeat of the same
-request within 60 seconds is served from the edge and never reaches the API
-host. The API host itself is responsive — the caching is the advantage, not a
-workaround. But **the Worker strips the `X-Api-Key` header** — it only forwards
-`Authorization`, `Accept` and `Accept-Language` (`worker.js:351`). An API-key
-client pointed at the Worker is silently unauthenticated and gets `401`.
+If you are self-hosting, use Go. The C# tree exists so the port can be checked
+against the thing it replaced, and `.github/workflows/docker-image.yml` keeps
+building it for that reason. Please don't repoint that workflow.
 
-Bearer tokens *are* forwarded, so they work through the Worker — they just
-bypass the cache, and requests to `/users`, `/albums` and friends are never
-cached regardless. If your bot authenticates in any form, use the API host.
-It is the only host that passes every credential through.
+### Go
 
-Anonymous reads are also reachable from a browser: the Worker sets
-`access-control-allow-origin: *` on its own responses, since it does not
-forward your `Origin` header upstream and so never gets one back. That is what
-lets the Playground on the docs site call it directly.
+Tests need a database — they refuse to run without one rather than silently
+skipping, because a skipped suite reports green while the service cannot start:
 
-### Prerequisites
+```bash
+docker run -d --name waifu-testdb -p 55432:5432 \
+  -e POSTGRES_PASSWORD=test -e POSTGRES_DB=waifutest pgvector/pgvector:pg18
+docker exec -i waifu-testdb psql -U postgres -d waifutest < backend/go/internal/store/schema.sql
+cd backend/go
+WAIFU_TEST_DATABASE_URL='postgres://postgres:test@localhost:55432/waifutest' go test ./...
+```
 
-- [Docker](https://docs.docker.com/get-docker/) & [Docker Compose](https://docs.docker.com/compose/install/)
-- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) (for local backend dev)
-- [Node.js 20+](https://nodejs.org/) (for local frontend dev)
-- A [Discord Application](https://discord.com/developers/applications) (for authentication)
-- S3-Compatible Storage (AWS S3, MinIO, Scaleway, etc.)
+### C#
 
-### 🛠️ Installation (Production)
+**Build in Release, not just Debug — Render publishes in Release**, and
+`SixLabors.ImageSharp` 4.x requires a commercial licence key that is only
+enforced there. The project is deliberately pinned to 3.1.12, which already
+ships `WebpEncoder`. Upgrading buys nothing and breaks the deploy.
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/KorryKatti/waifu-api.git
-   cd waifu-api
-   ```
+```bash
+cd backend
+docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
+  dotnet publish WaifuApi.Web/WaifuApi.Web.csproj -c Release -o /app/publish \
+  /p:UseAppHost=false /p:Version=0.0.0-local /p:OpenApiGenerateDocumentsOnBuild=false
+```
 
-2. **Configure Environment**
-   Create your `.env` file from the example:
-   ```bash
-   cp .env.example .env
-   ```
+## ☁️ Hosting notes
 
-   Edit `.env` with your credentials.
-
-   **🌐 Production (Example)**
-   ```ini
-   # Backend
-   API_BASE_PATH="/"
-
-   # Frontend
-   VITE_API_URL="https://waifu-api-031n.onrender.com"
-   VITE_DISCORD_REDIRECT_URI="https://waifu-api-eosin.vercel.app/auth/callback"
-   ```
-
-3. **Launch**
-   ```bash
-   docker-compose up -d
-   ```
-
-### 💻 Local Development
-
-For active development, we recommend running the database via Docker and the services natively.
-
-1. **Start Database & Infrastructure**
-   ```bash
-   docker-compose -f docker-compose.dev.yml up -d
-   ```
-   This starts PostgreSQL (with pgvector) and Adminer.
-
-2. **Configure Environment**
-   Ensure your `.env` file is set up for local development:
-   ```ini
-   # Backend
-   API_BASE_PATH="/api"
-
-   # Frontend
-   VITE_API_URL="http://localhost:5261/api"
-   VITE_DISCORD_REDIRECT_URI="http://localhost:5173/auth/callback"
-   ```
-
-3. **Run Backend (.NET)**
-   ```bash
-   cd backend/WaifuApi.Web
-   dotnet run
-   ```
-   The API will be available at `http://localhost:5261`.
-
-4. **Run Frontend (Vite)**
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-   The frontend will be available at `http://localhost:5173`.
-
-### 🔌 Hosting notes
-
-The reference deployment in this fork does not run the API and its images from
-the same host. `Cdn__BaseUrl` points at a Cloudflare Worker rather than at
-storage directly:
+The reference deployment does not serve API and images from one host:
 
 | | |
 |---|---|
 | API | Render — JSON metadata, Postgres queries |
-| Images | Cloudflare Worker — signs SigV4 to a private object store, caches at the edge |
+| Images | Cloudflare Worker — signs SigV4 to a private bucket, caches at the edge |
 | Anonymous API reads | Cloudflare Worker — proxies to Render, caches for 60s |
 
-This matters if you self-host. IDrive (among others) no longer allows public
-buckets to be created, so the Worker exists to fetch from a private one. AWS S3
-or MinIO can be made public directly and don't need it.
+The Worker exists because storage is **private**; there is no public read path.
+IDrive (among others) no longer permits public buckets. AWS S3 or MinIO can be
+made public directly and don't need the Worker at all.
 
-The Worker fronts API reads too, not just images. A request without an image
-extension is proxied to the API host, and an anonymous `GET` is cached for 60
-seconds so a page load's `/images` + `/tags` + `/stats` is one round trip
-instead of three. Authenticated requests are never stored, so users can't be
-served each other's favourites or albums.
-
-Invalidating that cache needs a `CACHE_VERSION` bump in
-[`scripts/mirror/worker/worker.js`](scripts/mirror/worker/worker.js) followed by
-a redeploy. There is no purge for a `workers.dev` Worker — see
-[`scripts/mirror/README.md`](scripts/mirror/README.md).
-
-#### Storage backend
-
-The Worker is pointed at **Tigris** (`https://t3.storage.dev`, region `auto`,
-bucket `waifu-api`, private). This replaced IDrive, whose free tier caps egress
-at 1:1 with stored data — a public image site exhausts that within a month and
-then fails every cache miss. Tigris includes free egress. Credentials are set as
-Worker secrets, never in `wrangler.toml`:
+Storage is **Tigris** (`https://t3.storage.dev`, region `auto`, bucket
+`waifu-api`). It replaced IDrive, whose free tier caps egress at 1:1 with stored
+data — a public image site exhausts that within a month and then fails every
+cache miss. Tigris includes free egress. Credentials are Worker secrets, never in
+`wrangler.toml`:
 
 ```bash
 cd scripts/mirror/worker
@@ -225,77 +180,57 @@ grep '^S3_SECRET_ACCESS_KEY=' ../.env | cut -d= -f2- | npx wrangler secret put S
 npx wrangler deploy
 ```
 
-#### WebP
+### WebP
 
-Two mechanisms produce WebP, and they are deliberately independent:
+Every PNG is converted and served back at its `.png` path, so **the database
+still says `.png` while the object is `{id}.webp`**. There are 1,162 such rows.
+Anything that builds a storage key itself will miss all of them — use the
+`storage.ObjectKeyCandidates` helper instead.
 
-- **Existing images** were converted offline with `cwebp` and uploaded under
-  `.webp` keys. The Worker maps a `.png` URL to the `.webp` object and reports
-  the origin's real `content-type`, so the legacy 1,162 PNG rows keep working
-  without a database change. Controlled by `WEBP_FALLBACK` in `wrangler.toml`;
-  set it to `"false"` and redeploy to revert to plain `.png` → `.png`.
-- **New uploads** are converted by the API at ingest. Off by default, PNG only,
-  animated images always skipped, and any conversion failure stores the
-  original bytes rather than failing the upload:
+Legacy images were converted offline with `cwebp` (toggle with `WEBP_FALLBACK`
+in `wrangler.toml`). New uploads are converted at ingest, off by default:
 
-  ```bash
-  Image__WebpConversionEnabled=true
-  Image__WebpQuality=90              # 1-100
-  Image__WebpSourceExtensions=.png   # comma-separated
-  ```
-
-  Metadata — including the perceptual hash behind duplicate detection — is still
-  read from the *original* bytes, so re-encoding never weakens dedupe.
-
-JPEG is excluded by default: it is already lossy-compressed, so re-encoding is
-lossy-to-lossy. At q90 the encoder produces output ~3% smaller than `libwebp`
-across this project's own PNGs.
-
-### ⚠️ Build in Release, not just Debug
-
-**Render publishes in Release. Always verify with the exact command it runs:**
-
-```bash
-dotnet publish WaifuApi.Web/WaifuApi.Web.csproj -c Release -o /app/publish \
-  /p:UseAppHost=false /p:Version=0.0.0-local /p:OpenApiGenerateDocumentsOnBuild=false
+```ini
+Image__WebpConversionEnabled=true
+Image__WebpQuality=90
+Image__WebpSourceExtensions=.png
 ```
 
-Debug builds and `dotnet test` pass while Release fails. This is not
-hypothetical — `SixLabors.ImageSharp` 4.x requires a commercial license key that
-is only enforced in Release, so an upgrade that looked fine locally took down
-the deploy. Note also that 3.1.12 already ships `WebpEncoder`, so there is no
-reason to move off it.
+The perceptual hash behind duplicate detection is still computed from the
+*original* bytes, so re-encoding never weakens dedupe. JPEG is excluded: it's
+already lossy, so re-encoding would be lossy-to-lossy.
 
-To check a dependency change the way production sees it, build in the SDK
-container:
+### Cache invalidation
 
-```bash
-cd backend
-docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
-  dotnet test
+There is no purge for a `workers.dev` Worker — no zone-level purge reaches it.
+Bump `CACHE_VERSION` in
+[`scripts/mirror/worker/worker.js`](scripts/mirror/worker/worker.js) and
+redeploy; entries are namespaced by it, so the old generation becomes
+unreachable and expires on its own.
+
+## 👑 Setting up an admin user
+
+Log in with Discord, then promote the account:
+
+```sql
+UPDATE "Users" SET "Role" = 3 WHERE "DiscordId" = 'YOUR_DISCORD_ID';
 ```
 
-### 👑 Setting up an Admin User
+`Role = 3` is Admin (`1` TrustedUser, `2` Moderator). In production, promote via
+Adminer or the Supabase dashboard rather than a local `psql`.
 
-To access administrative features (moderation, tag management, etc.), you need to promote your user account.
+## 📚 Further reading
 
-1. **Login**: Go to your frontend URL and log in with Discord.
-2. **Access Database**: Connect to your PostgreSQL database (using the `adminer` service at `http://localhost:8081` or CLI).
-3. **Promote User**: Run the following SQL query, replacing `YOUR_DISCORD_ID` with your actual Discord User ID:
+- [`AGENTS.md`](AGENTS.md) — operational hazards: deployment fields, the
+  Npgsql connection-string trap, CORS, and why the duplicate threshold is `4`
+- [`scripts/mirror/README.md`](scripts/mirror/README.md) — importing a database
+  export and mirroring the archive into any S3-compatible bucket
+- [`bot/README.md`](bot/README.md) — the sample Discord bot
 
-   ```sql
-   UPDATE "Users" 
-   SET "Role" = 3 
-   WHERE "DiscordId" = 'YOUR_DISCORD_ID';
-   ```
-   *(Role 3 corresponds to Admin)*
+## Special thanks
 
-### Special Thanks
-
-A huge thank you to our community contributors who help expand our database:
-
-- **[Ruhannn](https://github.com/Ruhannn)** - Curated the `kamisato-ayaka` tag collection.
-- **[Buco7854](https://github.com/Buco7854)** - Original author and maintainer of this project for over three years.
+- **[Ruhannn](https://github.com/Ruhannn)** — curated the `kamisato-ayaka` tag collection.
+- **[Buco7854](https://github.com/Buco7854)** — original author and maintainer for over three years.
 
 ## License
 
