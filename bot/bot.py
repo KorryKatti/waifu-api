@@ -18,7 +18,29 @@ load_dotenv()
 # its own right; the caching is the advantage, not a workaround for a sleeping
 # backend. The response shape is identical either way.
 API_BASE = os.getenv("WAIFU_API", "https://waifu-cdn.waifu-api.workers.dev").rstrip("/")
+
+# The API host itself, used only by the keep-alive probe.
+#
+# Probing API_BASE does not keep Render awake, and that is the point of this
+# variable. /ping is not on the worker's NEVER_CACHE list, so it is served from
+# the edge for JSON_TTL_SECONDS (60s) - and the probe interval is also 60s. Two
+# equal periods means whether a given probe reaches the origin is decided by
+# sub-second timing jitter: land after the entry expires and it forwards, land
+# before and the worker answers from cache and Render never sees the request at
+# all. The keep-alive works roughly half the time.
+#
+# Going straight to the host removes the cache from the path entirely, so every
+# probe lands. Falls back to API_BASE, which is correct for a bot running
+# against an uncached origin already.
+ORIGIN_BASE = os.getenv("WAIFU_ORIGIN", API_BASE).rstrip("/")
+
 PREFIX = os.getenv("PREFIX", "!")
+
+# Ordinary API calls give up after 30s. The keep-alive probe overrides this,
+# because a cold start on a free Render instance takes longer than that and a
+# timeout expiring mid-wake scores a healthy API as an error.
+DEFAULT_TIMEOUT_SECONDS = 30
+PROBE_TIMEOUT_SECONDS = 90
 NSFW_CHANNELS = {int(c) for c in os.getenv("NSFW_CHANNELS", "").split(",") if c.strip().lstrip("-").isdigit()}
 
 logging.basicConfig(level=logging.INFO)
@@ -129,7 +151,7 @@ def note_served(img):
     STATS["last_id"] = img.get("id")
 
 
-async def api_get(path, **params):
+async def api_get(path, *, base=None, timeout=None, **params):
     """GET a path from the API host, returning the decoded body.
 
     Every API call goes through here so latency and errors are recorded wherever
@@ -138,11 +160,15 @@ async def api_get(path, **params):
     The body is JSON when the response says it is and text otherwise: /ping
     answers `pong` as text/plain, so decoding unconditionally would turn a
     healthy API into a raised ContentTypeError.
+
+    base and timeout are keyword-only so they can never be mistaken for query
+    parameters: `timeout=5` meant as a query value would otherwise be swallowed
+    as the request timeout instead of being sent.
     """
     global session
     sess = session
     if sess is None or sess.closed:
-        sess = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+        sess = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT_SECONDS))
     # urlencode, not string joining: a tag containing a space, "&" or "#"
     # would otherwise produce a malformed URL or, worse, silently inject an
     # extra parameter. Today's slugs are all lowercase and hyphenated so nothing
@@ -150,12 +176,18 @@ async def api_get(path, **params):
     query = urllib.parse.urlencode(
         {k: v for k, v in params.items() if v not in (None, "", [])}
     )
-    url = f"{API_BASE}/{path.lstrip('/')}"
+    url = f"{base or API_BASE}/{path.lstrip('/')}"
     if query:
         url = f"{url}?{query}"
     started = time.monotonic()
     try:
-        async with sess.get(url) as resp:
+        # Per request, not per session: the session is built once in on_ready,
+        # so a session-level timeout would apply to whichever call happened to
+        # create it and to nothing afterwards.
+        async with sess.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=timeout or DEFAULT_TIMEOUT_SECONDS),
+        ) as resp:
             if resp.status >= 400:
                 note_error()
                 raise WaifuApiError(
@@ -555,12 +587,18 @@ async def probe_api():
     Two rates: /ping is cheap and tells us latency and whether the API is
     answering at all, /stats/public is a bigger payload and barely moves, so it
     is read far less often.
+
+    The ping goes to ORIGIN_BASE, not API_BASE, and carries the longer timeout.
+    Through the edge it would be served from a 60s cache on a 60s interval, so
+    it would only reach Render about half the time and would not reliably keep
+    the instance awake; and when the instance had spun down, the 30s default
+    would expire before a cold start finished and record a working API as down.
     """
     await bot.wait_until_ready()
     last_counts = 0.0
     while not bot.is_closed():
         try:
-            await api_get("ping")
+            await api_get("ping", base=ORIGIN_BASE, timeout=PROBE_TIMEOUT_SECONDS)
             if time.monotonic() - last_counts >= COUNT_REFRESH_SECONDS:
                 # A failed refresh is already counted by api_get; the next round
                 # retries, so there is nothing extra to record here.

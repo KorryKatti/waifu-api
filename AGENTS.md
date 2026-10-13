@@ -85,11 +85,41 @@ Worker. `Image.Extension` is still `.png`, so a plain `{id}{ext}` fetch misses
 all 1,162 PNG rows and reports them absent. Use `storage.ObjectKeyCandidates`
 rather than constructing the key yourself.
 
+### `/storage-diff` had a delete button pointed at the wrong list
+
+The same trap reached `ListCatalogueKeys`, which reconstructed `{id}{ext}` and
+compared it against a bucket of `{id}.webp`. Every PNG row came back an orphan —
+1,162 of them, plus one genuine orphan, which is the **1,163** the reconciliation
+page showed on its first appearance under Go. The page renders a delete button
+beside every orphan row.
+
+Two directions were wrong, not one. A stored object is an orphan only when it
+matches no row's candidate keys, and a row is missing only when *none* of its
+keys are in the bucket. Testing each key independently flags a PNG as missing
+while its `.webp` sits in the bucket.
+
+So the page counts **orphans = 1, missing = 0** on a healthy bucket, and the one
+orphan is `__parity_probe.tmp`, a file left behind by the route parity sweep.
+
+Reconciliation code is destructive-adjacent. When it disagrees with reality,
+believe it over the database until a probe proves otherwise, and never click
+delete on a list whose construction you have not read.
+
 ### Duplicate detection has never worked, on any implementation
 
 The C# hashes do not reproduce themselves, and v6 — which was Go — had no
 duplicate detection at all. The threshold of `4` was chosen against an algorithm
-that never existed consistently. Re-tune it from the real distribution.
+that never existed consistently.
+
+**It has now been measured against the real distribution, and `4` is correct.
+Do not retune it.** Go's pHash reproduces itself, so the corpus is comparable
+for the first time. Genuine duplicates sit at Hamming distance **0 and 2**;
+there are **no pairs at 3–9**; the nearest genuinely-different images start at
+**10**. Distance 4 has a wide empty margin on both sides.
+
+The stale advice was the risk: a future reader would have retuned a validated
+number against no data. If the corpus changes shape, re-measure — do not adjust
+by feel.
 
 ### Known licensing trap
 
