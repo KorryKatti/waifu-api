@@ -310,6 +310,23 @@ function isCacheableApiRequest(request, url) {
     return false;
   }
 
+  // A randomly ordered image query is a dice roll dressed up as a URL.
+  //
+  // `?orderBy=Random&pageSize=1` is byte-identical on every call — the Discord
+  // bot sends exactly that — so the edge stored one envelope and handed the
+  // same image to everyone for the full 60s TTL. The origin does order by
+  // RANDOM(); it simply was never asked twice.
+  //
+  // Case-insensitive on the name, because the API binds query names that way
+  // and a caller writing `orderby` gets randomness regardless of casing. The
+  // value is compared case-insensitively for the same reason: `Random` is the
+  // documented spelling and `random` is not an error the API reports.
+  for (const [key, value] of url.searchParams) {
+    if (key.toLowerCase() === "orderby" && value.trim().toLowerCase() === "random") {
+      return false;
+    }
+  }
+
   return true;
 }
 

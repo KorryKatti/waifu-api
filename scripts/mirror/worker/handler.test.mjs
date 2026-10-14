@@ -70,5 +70,53 @@ await check('.jpeg served from .webp',  '/6.jpeg', '6.webp');
 await check('fallback when no .webp',   '/9.jpeg', '9.jpeg');
 await check('gif untouched',            '/x.gif',  'x.gif', 404);
 
+// A random-ordered read must reach the origin on every call. The image checks
+// above can all pass while `!waifu` serves one cached image to everyone for the
+// TTL, because caching is invisible to them.
+async function checkApiCacheable(label, search, wantCacheable) {
+  const puts = [];
+  const matches = [];
+  globalThis.caches = {
+    default: {
+      match: async (key) => { matches.push(key); return undefined; },
+      put: async (key) => { puts.push(key); },
+    },
+  };
+  globalThis.fetch = async () => new Response('{"items":[]}', {
+    status: 200, headers: { 'content-type': 'application/json' },
+  });
+  const env = { API_ORIGIN: 'https://origin.example' };
+  let res;
+  try {
+    res = await worker.fetch(new Request('https://cdn.example/images' + search), env, {
+      waitUntil() {},
+    });
+  } catch (e) {
+    failures++;
+    console.log(`  FAIL  ${label} threw ${e.constructor.name}: ${e.message}`);
+    return;
+  }
+  const cached = wantCacheable ? puts.length > 0 : puts.length === 0;
+  if (!cached) {
+    failures++;
+    console.log(`  FAIL  ${label} ${wantCacheable ? 'was not' : 'was'} cached`);
+    return;
+  }
+  const looked = wantCacheable ? matches.length > 0 : matches.length === 0;
+  if (!looked) {
+    failures++;
+    console.log(`  FAIL  ${label} ${wantCacheable ? 'skipped' : 'consulted'} the cache`);
+    return;
+  }
+  console.log(`  pass  ${label} -> ${res.status} cacheable=${wantCacheable}`);
+}
+
+console.log('random-ordered reads bypass the edge cache:');
+await checkApiCacheable('orderBy=Random',        '?orderBy=Random&pageSize=1', false);
+await checkApiCacheable('orderby lowercase',     '?orderby=Random&pageSize=1', false);
+await checkApiCacheable('orderBy=random',       '?orderby=random&pageSize=1', false);
+await checkApiCacheable('orderBy=UploadedAt',   '?orderBy=UploadedAt', true);
+await checkApiCacheable('no orderBy',           '?pageSize=1', true);
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed');
 process.exit(failures ? 1 : 0);
