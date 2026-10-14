@@ -187,6 +187,19 @@ All off by default. Animated images are always skipped; conversion failure
 stores the original bytes rather than failing the upload. Duplicate-detection
 hashes are computed from original bytes, before any re-encode.
 
+`Image__WebpSourceExtensions` defaults to `.png` **alone**, so turning the flag
+on without editing it converts nothing that matters. The recommended setting is:
+
+```ini
+Image__WebpConversionEnabled=true
+Image__WebpQuality=85
+Image__WebpSourceExtensions=.png,.jpeg,.jpg
+```
+
+85 is measured, not guessed: over a 24-image sample of this project's own JPEGs
+it is the cheapest quality where no image fell below 0.95 SSIM. See
+[`AGENTS.md`](AGENTS.md) for the table.
+
 ### Cache invalidation
 
 No purge reaches a `workers.dev` Worker. Bump `CACHE_VERSION` in
