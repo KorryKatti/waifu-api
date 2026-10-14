@@ -3,344 +3,264 @@
 Notes for agents and contributors working in this repo. These are the things
 that have actually cost time, not generic advice.
 
+**This file is public. Keep the rule, drop the confession.** Record what a
+contributor needs in order to write correct code. Do not record the size of a
+gap, the shape of a failure, or the number of records something went wrong for.
+If a fix needs a detail that would help someone find the hole, that detail
+belongs in the commit that closes it, not here — and even there, say what changed
+rather than what was exploitable.
+
 ## Build and test
 
-**Always verify in Release, because Render publishes in Release.** Debug builds
-and `dotnet test` pass in situations where the deploy breaks.
+**The Go suite is the one that matters** — it is what production runs. The C#
+suite exists because the Go tests compare against it.
 
 ```bash
-# What Render actually runs
+# Go: needs a real database and refuses to run without one rather than
+# silently skipping.
+docker run -d --name waifu-testdb -p 55432:5432 \
+  -e POSTGRES_PASSWORD=test -e POSTGRES_DB=waifutest pgvector/pgvector:pg18
+docker exec -i waifu-testdb psql -U postgres -d waifutest \
+  < backend/go/internal/store/schema.sql
+cd backend/go
+WAIFU_TEST_DATABASE_URL='postgres://postgres:test@localhost:55432/waifutest' \
+  go test ./...
+```
+
+```bash
+# C#: the behavioural oracle, and what Render used to publish
 cd backend
 docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
   dotnet publish WaifuApi.Web/WaifuApi.Web.csproj -c Release -o /app/publish \
   /p:UseAppHost=false /p:Version=0.0.0-local /p:OpenApiGenerateDocumentsOnBuild=false
-
-# Test suite
 docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet test
 ```
 
-There is no local `dotnet`; use the SDK container. It is the same SDK Render
-builds with.
+There is no local `dotnet`; use the SDK container. **Always verify C# in
+Release** — Debug and `dotnet test` pass in situations where the deploy breaks.
 
-## The Go rewrite: validated, merged, not yet deployed
+## Where the backend actually runs
 
-`backend/go` is a complete, tested replacement for the C# service. It is on
-`main`. **Production still runs the C# service**, and switching it over is an
-outstanding step, not a completed one.
+**Production is the Go service.** The cutover is done, not pending. Render
+builds `backend/go/Dockerfile` with build context `backend/go`;
+`docker-compose.yml` builds it the same way, so local and production match.
 
-### How it deploys: two fields in the Render dashboard
-
-Render builds this service from source rather than pulling a published image, so
-no CI image-publishing workflow is needed and none exists. To point it at Go:
-
-| Field | From | To |
-|---|---|---|
-| Dockerfile Path | `backend/Dockerfile` | `backend/go/Dockerfile` |
-| Docker Build Context Directory | `backend/` | `backend/go` |
-
-Both are relative to the repo root. **Leave the hostname alone.** The Cloudflare
-Worker in `scripts/mirror/worker` hardcodes
-`API_ORIGIN = "https://waifu-api-031n.onrender.com"`, so a new Render service
-would 404 every anonymous API read the moment it went live. Swapping the image
-on the existing service keeps the hostname and changes nothing upstream of it.
-`bot/.env.example` names the same host.
-
-`docker-compose.yml` and `docker-compose.preprod.yml` build the Go backend the
-same way, so local and production match.
-
-### Two things safe to know about the switch
-
-**The boot-time cleanup is harmless.** `background.runJob` runs each job once at
-startup, and `StatsCleanup` issues `DeleteDailyStatsBefore` — which sounds
-alarming and is not. Go uses `AddDate(-1, 0, 0)` and C# uses `AddYears(-1)`:
-the same one-year cutoff, and `DailyStats` currently holds 7 rows, none older
-than a year. It would delete nothing. Revisit if that table ever passes a year
-of data.
-
-**Duplicate detection is off until the switch.** `PerceptualHash` now holds Go
-hashes, which a C# upload cannot match — distances land near 32 against a
-threshold of 4. This is why the cutover is worth doing rather than skipping.
-
-### The C# service stays
-
-It is the behavioural oracle the Go tests compare against, and
-`.github/workflows/docker-image.yml` keeps building it in Release. Removing
+The C# service is **retained as the behavioural oracle** the Go tests compare
+against, and `.github/workflows/docker-image.yml` keeps building it. Removing
 either removes the thing that makes the rewrite trustworthy. Do not repoint that
-workflow.
+workflow, and do not add features to it — development happens in `backend/go`.
 
-Full record, including two production bugs this found and how they were
-measured: `plans/cutover-validation-log.md`. Plan and reasoning:
-`backend/go/internal/images/phash/MIGRATION.md`.
+**Leave the hostname alone.** The Worker hardcodes `API_ORIGIN`, so a *new*
+Render service would break anonymous reads the moment it went live. Swapping the
+image on the existing service is what keeps it working.
 
-### Never point the Go service at the production database
+Full record: `plans/cutover-validation-log.md`. Feature plans live in `plans/`.
+
+### Never point a local instance at the production database
 
 `background.runJob` runs each cleanup job **once at startup**, before its daily
-ticker, matching the C# behaviour. `StatsCleanup` is unconditional and issues
-`DeleteDailyStatsBefore`. Booting Go against production deletes rows immediately.
+ticker. `StatsCleanup` is unconditional and issues `DeleteDailyStatsBefore`, so
+a second Go instance booting against production deletes rows immediately.
 
-### PNGs are stored as WebP
+Production is safe from this only because there is a single instance. Use a
+local database.
 
-Every PNG is converted at upload and served back at its `.png` path by the
-Worker. `Image.Extension` is still `.png`, so a plain `{id}{ext}` fetch misses
-all 1,162 PNG rows and reports them absent. Use `storage.ObjectKeyCandidates`
-rather than constructing the key yourself.
+### CORS is not a route concern
 
-### The free tier is 5 GB, not 10 — and the cap is hit from both directions
+`withCORS` mirrors the C# `UseCors("AllowAll")` policy — any origin, any method,
+any header. It is invisible to `routecheck` and to a route sweep, because a
+route is a path and a method and CORS is a **header**. A route sweep will never
+catch a regression here. Header behaviour needs its own tests: `cors_test.go`.
 
-Tigris allows **5 GB** of standard storage. Cloudflare R2 allows 10, but R2
-requires a card on the account, which is why Tigris is the bucket. The bucket
-held ~4.6 GB with 4,287 images.
+## Storage and images
 
-**The conversion order matters more than the conversion.** Writing every
-`.webp` alongside the originals before deleting any of them would peak at
-roughly 7.6 GB — over the cap, and over it for the entire run rather than
-momentarily. `scripts/mirror/webp_backfill.py` therefore works in batches:
-convert, upload, **verify the written size by reading it back**, and only then
-delete that batch's originals. Storage never rises by more than one batch.
+The bucket is **Tigris**, private, fronted by the Cloudflare Worker in
+`scripts/mirror/worker`, which signs SigV4 and caches at the edge. There is no
+public read path. Backend code and that worker are what stand between you and a
+broken public site.
 
-### JPEG → WebP is worth 57% here, not the usual 25–35%
+Worker secrets are **not** in `wrangler.toml`. They are set with
+`npx wrangler secret put` and sourced from the gitignored `scripts/mirror/.env`.
 
-Measured on 24 of this project's own JPEGs, SSIM against the original, libwebp
-via Pillow `method=4`:
+### Use `storage.ObjectKeyCandidates`, never construct a key
 
-| quality | size saved | mean SSIM | min SSIM | files < 0.95 |
-| --- | --- | --- | --- | --- |
-| 75 | 71.5% | 0.979 | 0.915 | 1/24 |
-| 80 | 65.4% | 0.983 | 0.932 | 1/24 |
-| **85** | **57.5%** | **0.987** | **0.953** | **0/24** |
-| 90 | 43.9% | 0.991 | 0.970 | 0/24 |
+`Image.Extension` records the format an image *was*, not the one it is *stored*
+as. Every PNG in the catalogue is stored as WebP and served back at its `.png`
+path. A plain `{id}{ext}` therefore finds nothing for those rows and reports
+them absent.
 
-85 is the setting. **Do not retune it from a blog post** — the reason it beats
-the published range is that anime art is mostly flat colour, and the
-transform-based predictor handles large uniform regions far better than the
-JPEG corpus those figures are measured on.
+This is the single most repeated trap in the repo's history. It has reached the
+upload path, the reconciliation page and the CDN worker at different times.
+
+### Conversion order: flip the column, then delete the original
+
+The free tier is a fixed cap, so writing every new object alongside the old ones
+before deleting any of them can exceed it for the entire run rather than
+momentarily. `scripts/mirror/webp_backfill.py` batches: convert, upload,
+**verify the written size by reading it back**, flip `Extension`, then delete
+that batch's originals.
+
+Flipping `Extension` *before* deleting is the load-bearing ordering. A row still
+naming the old extension makes the API hand out a URL for an object that is
+gone — a 404 handed to a client rather than to the bucket.
+
+Runbook is embedded in the tool: `python3 scripts/mirror/webp_backfill.py --runbook`.
+
+### WebP quality: 85
+
+Measured on this project's own images with SSIM against the original. 85 is the
+cheapest quality where nothing sampled fell into visible loss, and it saves more
+than the commonly quoted range for JPEG→WebP because anime art is mostly flat
+colour. **Do not retune from a blog post** — re-measure the same way if the
+corpus changes.
+
+Weigh size over quality deliberately: most consumers are Discord bots rendering
+at embed size, not a wallpaper site printing to a 4K monitor.
 
 **Dimensions are never changed.** Re-encoding alters bytes only, so `Width` and
-`Height` stay correct and the resolution filter keeps working. Resizing would
-change both, and that is a different decision with a different cost — the
-catalogue holds 489 images over 4000px averaging 5.9 MB each, which is a
-third of the bytes and the obvious next target if storage is tight again.
+`Height` stay correct and the resolution filter keeps working. Resizing changes
+both and is a separate decision.
 
-**AVIF is not an option.** Discord's media proxy does not render it, and bots
-are the main consumer of this API.
+**AVIF renders in Discord** — confirmed in their engineering blog and verified
+here. It is still not worth taking: encoding is far slower than WebP, which
+lands on every upload, and content negotiation gains nothing because the main
+consumer expresses no preference.
 
-### The worker's WebP mapping has two kill switches now
+**Animated WebP is the obvious next saving** and the guard has not been lifted.
+`TryConvertWebP` returns early on `isAnimated`; changing that also moves
+`Extension` while `IsAnimated` stays true, so clients that infer animation from
+the extension break. Discord reports large savings converting GIFs, but measure
+it here before believing a number taken from their emoji pipeline.
 
-`webpCandidate()` in `worker.js` maps `.png` and `.jpeg`/`.jpg` to `.webp`,
-under `WEBP_FALLBACK` and `WEBP_JPEG_FALLBACK` respectively. They are separate
-because the `.png` path is deployed and serving traffic while the `.jpeg` one
-is new; one flag would mean reverting the new behaviour also silently reverts
-the working one. `.gif` is deliberately excluded — re-encoding animation for
-storage is how you get artefacts.
+### Both Worker tests are mandatory
 
-The function is pure and covered by `worker.js`'s `webp_candidate.test.mjs`
-(`node webp_candidate.test.mjs`). Run it after touching the extension
-arithmetic: a mistake there turns a working image into a 404 with no error
-anywhere. Returning `null` is always safe, since the caller falls back to the
-original key.
+```bash
+cd scripts/mirror/worker
+node webp_candidate.test.mjs   # the extension arithmetic
+node handler.test.mjs          # drives the real fetch()
+```
 
-### `/storage-diff` had a delete button pointed at the wrong list
+**`handler.test.mjs` matters more.** `node --check` parses without executing,
+so it passes an unbound identifier that only fails at request time — and a
+change once shipped that way took the CDN down for an extended period before
+anyone noticed. The unit test for the pure function passed too, because the
+defect was in its caller. **Execute the path, don't just parse it.**
 
-The same trap reached `ListCatalogueKeys`, which reconstructed `{id}{ext}` and
-compared it against a bucket of `{id}.webp`. Every PNG row came back an orphan —
-1,162 of them, plus one genuine orphan, which is the **1,163** the reconciliation
-page showed on its first appearance under Go. The page renders a delete button
-beside every orphan row.
+### Hash before converting
 
-Two directions were wrong, not one. A stored object is an orphan only when it
-matches no row's candidate keys, and a row is missing only when *none* of its
-keys are in the bucket. Testing each key independently flags a PNG as missing
-while its `.webp` sits in the bucket.
+The perceptual hash is computed from the original upload bytes, never from the
+re-encoded copy. `upload.go` converts for storage *after* hashing. Reversing
+that makes dedupe unreliable across the format boundary, and almost every
+upload now sits on that boundary.
 
-So the page counts **orphans = 1, missing = 0** on a healthy bucket, and the one
-orphan is `__parity_probe.tmp`, a file left behind by the route parity sweep.
+### The duplicate threshold is validated
 
-Reconciliation code is destructive-adjacent. When it disagrees with reality,
-believe it over the database until a probe proves otherwise, and never click
-delete on a list whose construction you have not read.
+`PerceptualHash` holds Go hashes throughout; the pre-migration values are
+preserved in `PerceptualHashLegacy`. **Do not drop that column** — it is the
+only record of what the original corpus contained.
 
-### Query parameter names are case-insensitive, and must stay that way
+The threshold of `4` was originally chosen against an algorithm that did not
+reproduce itself, so it was re-measured against the real distribution and is
+now correct. Do not retune it by feel. `internal/images/phash` intentionally
+does not chase bit-exactness with C#, because that gap moves with the CPU. See
+`backend/go/tools/oracle/README.md`.
+
+## Query parameters are case-insensitive
 
 The C# service bound `[FromQuery]` models, and ASP.NET matches query names
-case-insensitively. `url.Values.Get` in Go is an exact map lookup, so the port
-made every parameter silently case-sensitive on the day it landed.
+case-insensitively. `url.Values.Get` in Go is an exact map lookup, so every
+parameter became case-sensitive on the day the port landed.
 
-Nothing errors on an unrecognised parameter, which is why it survived a full
-route sweep and went unnoticed. Callers got **valid, complete, wrong answers**:
+Reads go through `queryParam`, which tries the exact spelling then falls back to
+a case-insensitive scan; `stringListParam` does the same. **Values are never
+lowercased** — `reviewStatus=Accepted` is an enum value.
 
-- `PageSize=5` ignored, default page size used. `!gallery` got one image, so its
-  Prev/Next buttons could not move — `(index+1) % 1` is always 0 — and Discord
-  still reported the edit as successful.
-- `IncludedTags` ignored, so a caller filtering to one tag got the whole
-  catalogue.
-- `IsNsfw=True` ignored, so NSFW requests returned SFW results.
-
-Query reads go through `queryParam`, which tries the exact spelling then falls
-back to a case-insensitive scan; `stringListParam` does the same. **Values are
-never lowercased** — `reviewStatus=Accepted` is an enum value.
-
-Two traps worth remembering:
+Two traps:
 
 **Do not "fix" this with a middleware** that lowercases parameter names on the
 way in. It looks tidier — one place, no call sites — and it breaks everything,
 because the code reads `query.Get("pageSize")` while the key has become
-`"pagesize"`. Normalising at the point of use is the version that cannot be
-forgotten.
+`"pagesize"`. That version was written, caught by its own new test, and thrown
+away. Normalising at the point of use is the version that cannot be forgotten.
 
 **Parity sweeps cannot catch this class of bug.** They call both backends with
-identical casing, so both honour the same names and agree perfectly — on inputs
-nobody sends. To catch a divergence, sweep with **mixed casing** on both sides.
+identical casing, so both agree perfectly — on inputs nobody sends. Sweep with
+**mixed casing** to catch a divergence.
 
-### Duplicate detection has never worked, on any implementation
+## Reconciliation is destructive-adjacent
 
-The C# hashes do not reproduce themselves, and v6 — which was Go — had no
-duplicate detection at all. The threshold of `4` was chosen against an algorithm
-that never existed consistently.
+`/storage-diff` lists objects with no catalogue row and rows with no object, and
+renders a delete control beside every orphan. Get the comparison right: an
+object is an orphan only when it matches no row's candidate keys, and a row is
+missing only when *none* of its keys are in the bucket. Testing each key
+independently is wrong in both directions.
 
-**It has now been measured against the real distribution, and `4` is correct.
-Do not retune it.** Go's pHash reproduces itself, so the corpus is comparable
-for the first time. Genuine duplicates sit at Hamming distance **0 and 2**;
-there are **no pairs at 3–9**; the nearest genuinely-different images start at
-**10**. Distance 4 has a wide empty margin on both sides.
+A healthy bucket reads **orphans = 1, missing = 0**. During a bulk conversion
+orphans climb legitimately — a new-format object whose row has not been flipped
+yet is an orphan by definition. A **missing** count above zero is never
+expected; stop.
 
-The stale advice was the risk: a future reader would have retuned a validated
-number against no data. If the corpus changes shape, re-measure — do not adjust
-by feel.
+When this page disagrees with reality, believe it over the database until a
+probe proves otherwise, and never click delete on a list whose construction you
+have not read.
 
-### Known licensing trap
+## Verifying your own work
 
-`SixLabors.ImageSharp` **4.x is commercially licensed** and fails Release
-publish without a `SixLaborsLicenseKey`. Do not upgrade to it casually — the
-project is deliberately pinned to **3.1.12**, which already ships
-`SixLabors.ImageSharp.Formats.Webp.WebpEncoder`. Upgrading buys nothing and
-breaks the deploy. 3.1.12 does carry open NuGet security advisories (NU1902 /
-NU1903); that is a known, accepted trade-off pending a decision on either a
-Six Labors license or replacing ImageSharp entirely.
-
-## Storage and images
-
-- Images live in a **private** bucket; there is no public read path. The
-  Cloudflare Worker in `scripts/mirror/worker` signs SigV4 and caches at the
-  edge. Backend code and this worker are what stand between you and a broken
-  public site.
-- Worker secrets are **not** in `wrangler.toml`. They are set with
-  `npx wrangler secret put` and sourced from `scripts/mirror/.env`, which is
-  gitignored.
-- `Image.Extension` is the single source of truth for both the S3 key
-  (`{id}{ext}`) and the URL the API hands out. If you change one path, check
-  the other still agrees — a mismatch produces images that 404.
-- The perceptual hash behind duplicate detection is computed from the
-  **original** upload bytes, never from a re-encoded copy. Keep it that way;
-  hashing a lossy re-encode makes dedupe unreliable across uploads.
+- **A green suite is necessary, not sufficient.** Every significant defect in
+  the cutover was a *silent divergence from the C# oracle* — valid, complete,
+  wrong answers rather than failures. The port's tests agreed with the port
+  because they encoded the port's assumptions, not the contract.
+- **Do not report "all clear" without probing.** Twice in one evening the system
+  was reported working while it was not. Both were caught by looking, not by
+  testing.
+- **Execution beats parsing.** `go build`, `go vet` and `node --check` all pass
+  an unbound identifier.
+- **When a probe fails, suspect the probe first.** A DNS typo and a wrong tuple
+  unpack produced confident false alarms; a bad cache-buster parameter wrote junk
+  entries into the real edge cache.
+- **Reconcile totals from independent sources** — dashboard, live API, object
+  store — before declaring a migration complete.
+- **Read the code that will run** before telling someone a command works.
 
 ## Data and migrations
 
 - `waifu-public.sql`-style dumps are **not** guaranteed current. Reconcile
-  counts against the live API and against the local mirror before trusting a
-  dump as a manifest. A stale dump silently omits recent images.
-- `Image.PerceptualHash` is a Postgres `bit(64)`, which `pg_dump` renders as
-  **64 binary characters**, not hex. The API exposes it as 16 lowercase hex
-  chars via `BitArrayHelper.ToHex`. Mixing the two up silently breaks
-  comparison.
+  against the live API and the local mirror before trusting one as a manifest.
+- `Image.PerceptualHash` is a Postgres `bit(64)`, which `pgdump` renders as 64
+  binary characters, not hex. The API exposes 16 lowercase hex chars. Mixing
+  them up silently breaks comparison.
+- The local corpus holds the originals and is the rollback for format
+  migrations. Keep it untouched.
+- The test database must match production exactly. `schema.sql` is not a
+  convenience fixture — where it drifts from the real database, tests pass and
+  production breaks. Compare the live table against what the code writes rather
+  than against `schema.sql`; rolled-back transactions are the check:
 
-### Perceptual hashes are not comparable across the two backends
-
-The C# service does not reproduce its own hashes. Running the oracle twice on
-one corpus with identical library versions, once normally and once with
-`DOTNET_EnableHWIntrinsic=0`, gave **248/554 identical** hashes, with
-divergences up to 38 bits — `ResizeKernel.ConvolveCore` accumulates with
-`Vector256.MultiplyAddEstimate` when AVX2 is present and a scalar float loop
-when it is not, and the two do not agree.
-
-So the ~4,000 stored hashes are a **mixture of at least two algorithms**,
-decided by whichever machine computed them. Consequences worth remembering:
-
-- A hash computed by the Go backend will **not** match historical rows, so
-  duplicate detection is blind across the boundary until a rehash backfill runs.
-- The Hamming threshold of 4 was chosen assuming a stable hash. It needs
-  re-validating after that backfill.
-- `internal/images/phash` is intentionally *not* chasing bit-exactness. Further
-  filter tuning cannot close a gap whose far side moves with the CPU. See
-  `backend/go/tools/oracle/README.md` for the full findings.
-
-## Verifying your own work
-
-- Do not tell someone a command or a cache-buster works before reading the code
-  that will run it.
-- When a probe or script fails, suspect the probe first. Several "findings"
-  during the Tigris migration were bugs in the measurement, not the system.
-- Reconcile totals from independent sources (dashboard, live API, object
-  store) before declaring a migration complete — that is how six missing images
-  surfaced.
+  ```sql
+  BEGIN;
+  INSERT INTO "Users" ("DiscordId","Name") VALUES ('probe','probe') RETURNING "Id";
+  ROLLBACK;
+  ```
 
 ### Render's connection string is Npgsql format, not a URL
 
-`ConnectionStrings__DefaultConnection` on Render is keyword/value with
-**semicolon** separators, because that is what the .NET service reads and what
-`scripts/mirror/mkconn.py` prints for pasting into the dashboard:
-
-```
-Host=db.example;Port=5432;Database=postgres;Username=u;Password=p%40ss;SSL Mode=Require
-```
+`ConnectionStrings__DefaultConnection` is keyword/value with **semicolon**
+separators, because that is what the .NET service reads and what
+`scripts/mirror/mkconn.py` prints for the dashboard.
 
 pgx does not accept that. `ParseConfig` understands a `postgres://` URL or
 space-separated pairs, so a semicolon-separated string parses to *nothing* and
-every field falls back to its default — the OS user, a blank database, and a
-Unix socket at `/tmp`. The error that comes out says the database is
-unreachable, not that the format is wrong:
+every field falls back to its default. `internal/config.normalizeConnectionString`
+converts it, and handles three things the obvious implementation misses: the
+password is percent-encoded by `mkconn.py` and Npgsql decodes it, `SSL Mode`
+has a space in the key, and `SSL Mode=Require` has a capital R that pgx rejects.
+URLs pass through untouched.
 
-```
-failed to connect to `user=nonroot database=`: /tmp/.s.PGSQL.5432 ... no such file or directory
-```
+## Known licensing trap
 
-`internal/config.normalizeConnectionString` converts it, and handles three
-things the obvious implementation misses: the password is percent-encoded by
-`mkconn.py` and Npgsql decodes it, `SSL Mode` has a space in the key, and
-`SSL Mode=Require` has a capital R that pgx rejects outright. URLs pass through
-untouched.
-
-If a connection failure ever reports `user=nonroot` or a socket path, this is
-why — not an unreachable database.
-
-### The Go service has no route-sweep blind spot left on CORS
-
-`withCORS` was missing entirely from the first cutover and took the site down.
-The C# service used `UseCors("AllowAll")` — any origin, any method, any header —
-and the port dropped it.
-
-The failure is hard to diagnose from the symptoms, because it looks like a
-network problem rather than a missing header. Browsers refuse to read a
-cross-origin response that carries no `Access-Control-Allow-Origin`, and a
-preflight for anything with an `Authorization` header or a JSON body got a
-**405**, because Go's mux matches a method exactly and no OPTIONS route was
-registered. So the frontend saw a blocked request *and* an outright rejection,
-for everything, while `curl` worked perfectly.
-
-It is invisible to `routecheck` and to a 59-endpoint sweep, because a route is a
-path and a method and CORS is a **header**. A route sweep will never catch this.
-Header behaviour needs its own tests, which is what `cors_test.go` is.
-
-### The test database is more permissive than production
-
-`schema.sql` documents `DEFAULT 0` and `DEFAULT false` on columns like
-`Users.RequestCount`. **Production has no defaults on any of them** — EF Core
-created them bare, `NOT NULL` with nothing to fill in. Every Go INSERT must
-therefore supply every `NOT NULL` column explicitly; omitting one inserts NULL
-and fails at runtime.
-
-This nearly caused a silent outage. `UpsertUserByDiscordID` omitted
-`IsBlacklisted` and the three counters, so **every Discord login failed** with a
-not-null violation, while the tests passed — because the test database is built
-from `schema.sql`, which has the defaults the real database lacks. A test
-database that differs from production defeats the point of having tests.
-
-To find this class of bug, compare the live table against what the code writes,
-not against `schema.sql`. Rolled-back transactions are the check:
-
-```sql
-BEGIN;
-INSERT INTO "Users" ("DiscordId","Name") VALUES ('probe','probe') RETURNING "Id";
-ROLLBACK;
-```
-
-Fourteen production INSERTs were checked this way; only `Users` was wrong.
+`SixLabors.ImageSharp` **4.x is commercially licensed** and fails Release
+publish without a `SixLaborsLicenseKey`. The project is deliberately pinned to
+**3.1.12**, which already ships `Formats.Webp.WebpEncoder`. Upgrading buys
+nothing and breaks the deploy. 3.1.12 carries open NuGet advisories (NU1902 /
+NU1903) — a known, accepted trade-off pending a decision on licensing or
+replacement. It applies to the C# oracle only; Go uses libwebp.
