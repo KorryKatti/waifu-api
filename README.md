@@ -198,7 +198,9 @@ Image__WebpSourceExtensions=.png,.jpeg,.jpg
 
 85 is measured, not guessed: over a 24-image sample of this project's own JPEGs
 it is the cheapest quality where no image fell below 0.95 SSIM. See
-[`AGENTS.md`](AGENTS.md) for the table.
+[`AGENTS.md`](AGENTS.md) for the table. Weights size over quality deliberately —
+most consumers here are Discord bots rendering at embed size, not a wallpaper
+site printing to a 4K monitor, so the bytes are worth more than the detail.
 
 ### Cache invalidation
 
