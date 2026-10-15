@@ -338,6 +338,59 @@ def nsfw_hint(channel):
     )
 
 
+def nsfw_param(channel):
+    """The `isNsfw` filter value for a channel.
+
+    "all" where Discord age-gates the channel, or where the admin listed it in
+    NSFW_CHANNELS. "False" everywhere else.
+
+    "all", not "True": being allowed to see NSFW is not a request for NSFW. An
+    artist's catalogue is usually mixed, and "True" would return only the NSFW
+    slice of it — so an artist with seven NSFW and a hundred SFW images would
+    show seven, and the SFW work would become unreachable from an age-restricted
+    channel. The channel says what the reader may see, so it asks for all of it.
+
+    An explicit `!waifu nsfw` still means "True", because that is the user
+    asking for NSFW specifically. Those are two different intents and they take
+    two different values.
+    """
+    return "all" if nsfw_allowed(channel) else "False"
+
+
+async def hidden_nsfw_total(path, params):
+    """How many NSFW images a query matches, if any.
+
+    Used only to decide whether to explain an empty result. Nothing from the
+    response is rendered: an age-restricted image must never reach a channel
+    Discord does not age-gate. A count is not content — the same number is
+    already on the public endpoint for anyone who asks for it — so this tells
+    a user *that* something is there without putting it on screen.
+
+    isNsfw=True, not "all": "all" counts NSFW and SFW together, so a message
+    built from it overstates what is being withheld.
+    """
+    status, body, _ = await api_request(
+        "GET", path, base=API_BASE,
+        params={**params, "isNsfw": "True", "pageSize": 1},
+    )
+    if status >= 400 or not isinstance(body, dict):
+        return 0
+    return body.get("totalCount") or 0
+
+
+async def nothing_found(interaction, params, noun, name, plain):
+    """Answer an empty result, saying why when the content is NSFW-gated."""
+    hidden = await hidden_nsfw_total("images", params)
+    if hidden and not nsfw_allowed(interaction.channel):
+        await interaction.followup.send(
+            f"{noun} `{name}` has {hidden} NSFW image(s) and nothing age-restricted "
+            f"is shown here. Use a channel with *Age Restriction* enabled.",
+            ephemeral=True,
+        )
+        return
+    await interaction.followup.send(plain, ephemeral=True)
+
+
 def command_usage(prefix, cmd):
     args = cmd.usage or cmd.signature or ""
     return f"{prefix}{cmd.qualified_name} {args}".strip()
@@ -688,15 +741,17 @@ async def waifu(ctx, *, query: str = ""):
     """Get a waifu. Optionally pass `nsfw`, `gif`, an orientation, or tag names."""
     parts = query.lower().split()
 
-    is_nsfw = "nsfw" in parts or nsfw_allowed(ctx.channel)
-    if "nsfw" in parts and not nsfw_allowed(ctx.channel):
+    wanted_nsfw = "nsfw" in parts
+    if wanted_nsfw and not nsfw_allowed(ctx.channel):
         await ctx.reply(f"This channel isn't an NSFW channel. {nsfw_hint(ctx.channel)}")
         return
-    if "nsfw" in parts:
+    if wanted_nsfw:
         parts.remove("nsfw")
 
     params = {
-        "isNsfw": "True" if is_nsfw else "False",
+        # An explicit `nsfw` is a request for NSFW; merely being in an
+        # age-restricted channel is not. See nsfw_param for why those differ.
+        "isNsfw": "True" if wanted_nsfw else nsfw_param(ctx.channel),
         "isAnimated": "All",
         "orderBy": "Random",
         "pageSize": 1,
@@ -771,9 +826,8 @@ class GalleryView(discord.ui.View):
 @commands.cooldown(1, 15, commands.BucketType.user)
 async def gallery(ctx):
     """Show a gallery of random waifus with prev/next buttons (valid 3 min)."""
-    is_nsfw = nsfw_allowed(ctx.channel)
     params = {
-        "isNsfw": "True" if is_nsfw else "False",
+        "isNsfw": nsfw_param(ctx.channel),
         "isAnimated": "All",
         "orderBy": "Random",
         "pageSize": 5,
@@ -922,6 +976,19 @@ async def slash_image(interaction: discord.Interaction, image_id: int):
             await interaction.followup.send(f"The API answered HTTP {status}.", ephemeral=True)
             return
 
+        # GET /images/{id} has no isNsfw filter — the endpoint serves whatever id
+        # you name, filtered on review status only. So the bot is the only gate
+        # here, and this check is load-bearing rather than defensive: without it
+        # `/image <nsfw id>` posts age-restricted content into a channel Discord
+        # does not age-gate, which is how a bot gets removed.
+        if body.get("isNsfw") and not nsfw_allowed(interaction.channel):
+            await interaction.followup.send(
+                f"Image {image_id} is NSFW and this channel isn't age-restricted. "
+                f"{nsfw_hint(interaction.channel)}",
+                ephemeral=True,
+            )
+            return
+
         embed = build_embed(body)
         embed.title = f"Image {body.get('id')}"
         embed.add_field(name="Size", value=f"{body.get('width')}x{body.get('height')}", inline=True)
@@ -939,16 +1006,20 @@ async def slash_image(interaction: discord.Interaction, image_id: int):
 @app_commands.describe(slug="Tag slug, e.g. maid.")
 async def slash_tag(interaction: discord.Interaction, slug: str):
     async def run():
-        status, body, _ = await api_request(
-            "GET", "images", base=API_BASE,
-            params={"includedTags": slug, "pageSize": 5},
-        )
+        params = {
+            "includedTags": slug,
+            "pageSize": 5,
+            "isNsfw": nsfw_param(interaction.channel),
+        }
+        status, body, _ = await api_request("GET", "images", base=API_BASE, params=params)
         if status >= 400:
             await interaction.followup.send(f"The API answered HTTP {status}.", ephemeral=True)
             return
         items = (body.get("items") or [])[:5]
         if not items:
-            await interaction.followup.send(f"No images tagged `{slug}`.", ephemeral=True)
+            await nothing_found(
+                interaction, params, "Tag", slug, f"No images tagged `{slug}`."
+            )
             return
         view = GalleryView(items, interaction.user)
         msg = await interaction.followup.send(embed=build_embed(items[0]), view=view)
@@ -962,16 +1033,18 @@ async def slash_tag(interaction: discord.Interaction, slug: str):
 @app_commands.describe(name="Artist name.")
 async def slash_artist(interaction: discord.Interaction, name: str):
     async def run():
-        status, body, _ = await api_request(
-            "GET", "images", base=API_BASE,
-            params={"includedArtists": name, "pageSize": 5},
-        )
+        params = {
+            "includedArtists": name,
+            "pageSize": 5,
+            "isNsfw": nsfw_param(interaction.channel),
+        }
+        status, body, _ = await api_request("GET", "images", base=API_BASE, params=params)
         if status >= 400:
             await interaction.followup.send(f"The API answered HTTP {status}.", ephemeral=True)
             return
         items = (body.get("items") or [])[:5]
         if not items:
-            await interaction.followup.send(f"No images by `{name}`.", ephemeral=True)
+            await nothing_found(interaction, params, "Artist", name, f"No images by `{name}`.")
             return
         view = GalleryView(items, interaction.user)
         msg = await interaction.followup.send(embed=build_embed(items[0]), view=view)

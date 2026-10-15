@@ -181,6 +181,28 @@ Using Discord's own setting is the stronger option — it gates non-bot members 
 If someone tries `!waifu nsfw` in a normal channel, the bot refuses and tells them
 which channel ID to add.
 
+This is not a rule only `!waifu nsfw` obeys. **Every command that returns images
+applies it**, and does so automatically — `/artist`, `/tag`, `!gallery` and
+`/image` read the channel rather than waiting to be told, so a normal channel
+gets SFW-only results with no extra flag and an age-restricted one gets NSFW
+without being asked.
+
+Permission and request are different things, so they take different values. A
+channel that is allowed to show NSFW is sent `isNsfw=all`, because being allowed
+to see something is not a request for it: an artist's catalogue is normally
+mixed, and filtering to NSFW-only would hide the SFW half of their work from the
+one channel that is allowed to show it. It would also quietly break the gallery
+— an artist with fewer NSFW images than the page size returns a short page and a
+"next" button that wraps through nothing. Explicit `!waifu nsfw` still sends
+`isNsfw=True`, since that *is* someone asking for NSFW specifically.
+
+That automatic behaviour is why the rule lives in the channel and not in the
+command. `GET /images` defaults to SFW-only when `isNsfw` is absent, so a command
+that forgets to send the filter is not a leak — it just silently under-reports,
+which looks exactly like a broken bot in an NSFW channel. It is the other
+direction that gets a bot removed: `GET /images/{id}` has no NSFW filter at all,
+so `/image <id>` is gated by the bot alone.
+
 ## Setup
 
 ```bash
