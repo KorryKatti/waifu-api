@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -41,9 +42,27 @@ func (s *Server) logError(r *http.Request, operation string, err error) {
 
 // withAuthentication resolves credentials and stores the caller on the context.
 //
-// An invalid credential produces 401 rather than being ignored. Treating a bad
-// token as anonymous would let a client believe it is unauthenticated and get a
-// confusing 403 later instead of a clear 401 here.
+// # An invalid credential is not a challenge
+//
+// A credential that cannot be resolved leaves the request anonymous. It does not
+// produce 401 here, and that distinction is the whole contract.
+//
+// ASP.NET separates *authentication* (working out who you are) from
+// *authorization* (deciding whether you may have this resource). A handler
+// without [Authorize] never challenges: ApiKeyAuthenticationHandler returns
+// AuthenticateResult.Fail("Invalid API Key") for an unknown key, UseAuthentication
+// records the failure, the action runs as an anonymous caller, and the response
+// is 200. Only a handler carrying [Authorize] calls HandleChallengeAsync, and
+// that is what produces 401.
+//
+// Challenging in the authentication step instead inverts that: one caller with a
+// revoked key 401s every endpoint they touch, including the ones C# serves them
+// happily. That is not hypothetical — GET /images has no [Authorize], and a
+// stranger's stale X-Api-Key was returning 401 for the public gallery.
+//
+// So the failure is logged and the request continues anonymous. requireAuth
+// then produces the 401 on the routes that genuinely need a principal, which is
+// where C# would have produced it too.
 func withAuthentication(authenticator *auth.Authenticator, lookup auth.UserLookup, log Logger) middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +85,18 @@ func withAuthentication(authenticator *auth.Authenticator, lookup auth.UserLooku
 				log.Error("authentication failed", "path", r.URL.Path, "error", err.Error())
 			}
 
-			writeUnauthorized(w, r)
+			// A blacklisted account is refused outright rather than made
+			// anonymous. C# does this in BlacklistMiddleware, which runs after
+			// authorization and throws ForbiddenException regardless of which
+			// endpoint was called, so it is a 403 on every route including the
+			// public ones — and never a 401, which is what an authentication
+			// failure means here.
+			if errors.Is(err, auth.ErrForbidden) {
+				writeBlacklisted(w, r)
+				return
+			}
+
+			next.ServeHTTP(w, r)
 		})
 	}
 }

@@ -27,12 +27,21 @@ func TestUploadRequiresAuthentication(t *testing.T) {
 	}
 }
 
-// TestUploadRequiresNoCredentialAtAll is the same guard without a malformed
-// body, confirming the order of the checks.
+// TestUploadRejectsBadToken checks a credential that does not resolve is still
+// refused on a route that requires one.
+//
+// It used to assert this against GET /images, which it does not test and which
+// has no [Authorize] in the C# service: a bad token there has to fall through as
+// anonymous and return 200, so the assertion encoded the very divergence it was
+// meant to guard. The upload route carries [Authorize(Policy = Moderator)], so
+// it is the place a bad credential is genuinely refused.
 func TestUploadRejectsBadToken(t *testing.T) {
 	h := newHarness(t)
 
-	resp := h.request("GET", "/images", "not-a-real-token", nil, "")
+	body, contentType := multipartImage(t, "file", "photo.png",
+		testImage(t, 100, 100, color.RGBA{60, 60, 60, 255}), map[string]string{"isNsfw": "false"})
+
+	resp := h.request("POST", "/images/upload", "not-a-real-token", body, contentType)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusUnauthorized {
