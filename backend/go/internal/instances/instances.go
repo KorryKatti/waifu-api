@@ -112,6 +112,10 @@ type Probe struct {
 	Schema    bool `json:"schema"`
 	Images    bool `json:"images"`
 
+	// NoImages records that the catalogue was readable and empty, so the image
+	// check could not be made rather than failing.
+	NoImages bool `json:"noImages,omitempty"`
+
 	// What the instance said about itself. Carried through verbatim and never
 	// scored: a string an instance reports about itself is not evidence.
 	Software string `json:"software,omitempty"`
@@ -140,11 +144,48 @@ type Probe struct {
 
 // OK reports whether the instance served its own images on this probe.
 //
-// It is deliberately not "reachable". An instance that answers /version and
-// then returns a shape no client can use is down as far as anyone pointing a
-// client at it is concerned.
+// It is what the uptime figure counts, and it is deliberately not "reachable":
+// an instance that answers /version and then returns a shape no client can use
+// is down as far as anyone pointing a client at it is concerned.
 func (p *Probe) OK() bool {
 	return p != nil && p.Reachable && p.Schema && p.Images
+}
+
+// NoImages records that the instance answered correctly but had an empty
+// catalogue, so there was nothing to serve and nothing to fetch.
+//
+// It exists to separate "we asked and it failed" from "we never asked", which is
+// the difference between counting a check and skipping it.
+// Checkable reports whether this probe produced a meaningful pass or fail for
+// the uptime history.
+//
+// Almost everything does, including an unreachable instance: a client pointed at
+// a server that is not answering is experiencing downtime, and that is what the
+// figure is supposed to report.
+//
+// The one exception is an empty catalogue. An instance with nothing uploaded is
+// working exactly as configured, and recording a failure against it every day
+// would report 0% uptime for the one thing it has no way to change. Those runs
+// are skipped, which leaves uptime null: nobody has observed it serving images,
+// and nobody has observed it failing to either.
+func (p *Probe) Checkable() bool {
+	return p != nil && !p.NoImages
+}
+
+// Compatible reports whether the instance speaks this software well enough to be
+// worth listing.
+//
+// It is the registration gate, and it is weaker than OK on purpose. Gating on OK
+// would refuse every instance that has not uploaded anything yet, which is the
+// opposite of what this feature is for: partial instances are explicitly welcome,
+// and a fresh deployment is the most partial one there is.
+//
+// The image check is therefore a *signal*, not a gate. An instance whose listing
+// is readable but whose images 404 is still listed — with the image signal shown
+// as failed, which is information a reader wants and which no amount of refusing
+// to register would convey.
+func (p *Probe) Compatible() bool {
+	return p != nil && p.Reachable && p.Schema
 }
 
 // Uptime is the fraction of the trailing window's checks that passed, or nil

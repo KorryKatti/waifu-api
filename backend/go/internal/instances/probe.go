@@ -73,8 +73,20 @@ func NewHTTPProber() *HTTPProber {
 	p := &HTTPProber{}
 
 	p.client = &http.Client{
-		Transport: &http.Transport{DialContext: p.dialContext},
-		Timeout:   ProbeTimeout,
+		Transport: &http.Transport{
+			DialContext: p.dialContext,
+
+			// These are resource limits, and this process runs on a 512 MB free
+			// tier. IdleConnTimeout matters most: without it a connection
+			// outlives the probe that made it, so the pool accumulates across
+			// days rather than shrinking between them. A handful of sockets, but
+			// it is free to bound them.
+			MaxIdleConns:          8,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   RequestTimeout,
+			ExpectContinueTimeout: time.Second,
+		},
+		Timeout: ProbeTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= MaxRedirects {
 				return fmt.Errorf("stopped after %d redirects", MaxRedirects)
@@ -174,6 +186,7 @@ func (p *HTTPProber) Probe(ctx context.Context, baseURL string) Probe {
 	// leaves the image signal unsatisfied rather than the response malformed.
 	if errors.Is(shapeErr, errEmptyCatalogue) {
 		result.Schema = true
+		result.NoImages = true
 		result.Error = shapeErr.Error()
 		return result
 	}
@@ -251,26 +264,48 @@ func (p *HTTPProber) image(ctx context.Context, base string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("GET /images: %w", err)
 	}
+	return ParseImageListing(body)
+}
 
+// ParseImageListing reads a GET /images response and returns the URL of its
+// first entry.
+//
+// It is exported so the shape can be checked against the response the images
+// handler actually produces, rather than against a fixture somebody wrote from
+// memory. An earlier version of this parsed `{"images": [...]}` while the
+// endpoint answers `{"items": [...], "totalCount": ..., ...}`, and every
+// registration was refused with a schema failure - the prober and its own test
+// fixture shared the same wrong assumption, so nothing caught it. The round-trip
+// test in internal/httpapi is what makes that class of mistake fail.
+//
+// An empty list is errEmptyCatalogue rather than a failure: the response was
+// readable, the instance simply has nothing in it to serve.
+func ParseImageListing(body []byte) (string, error) {
 	var listing struct {
-		Images []struct {
+		Items []struct {
 			URL string `json:"url"`
-		} `json:"images"`
+		} `json:"items"`
+		TotalCount *int `json:"totalCount"`
 	}
+
 	if err := json.Unmarshal(body, &listing); err != nil {
-		return "", fmt.Errorf("GET /images: response is not the expected shape: %w", err)
+		return "", fmt.Errorf("GET /images: response is not valid JSON: %w", err)
 	}
-	if len(listing.Images) == 0 {
-		// An instance with no images is a working instance. It is not evidence
-		// that the catalogue is readable, so the check is inconclusive rather
-		// than failed, and the image signal stays false without claiming a
-		// fault.
+
+	// totalCount is the envelope field a client reads to page, so requiring it
+	// is what distinguishes this endpoint's shape from an arbitrary object that
+	// happens to have an array in it.
+	if listing.TotalCount == nil {
+		return "", fmt.Errorf("GET /images: response has no totalCount, so it is not an image listing")
+	}
+
+	if len(listing.Items) == 0 {
 		return "", errEmptyCatalogue
 	}
-	if listing.Images[0].URL == "" {
+	if listing.Items[0].URL == "" {
 		return "", fmt.Errorf("GET /images: the first entry carries no url")
 	}
-	return listing.Images[0].URL, nil
+	return listing.Items[0].URL, nil
 }
 
 // errEmptyCatalogue means the instance served a well-formed empty listing.

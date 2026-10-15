@@ -20,6 +20,7 @@ const sidebars: SidebarsConfig = {
     "rate-limiting",
     "versioning",
     "tags",
+    "instances",
     "terms-of-service",
   ],
   api: [

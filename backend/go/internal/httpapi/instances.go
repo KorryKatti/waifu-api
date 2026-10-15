@@ -266,9 +266,14 @@ func (s *Server) handleRegisterInstance(w http.ResponseWriter, r *http.Request) 
 
 	// The probe is what makes the entry mean something, so it runs before
 	// anything is written rather than being left to the daily job. An instance
-	// that cannot answer its own handshake does not get listed as working.
+	// that cannot answer its own handshake does not get listed.
+	//
+	// The gate is Compatible rather than OK: an instance with nothing uploaded
+	// yet is welcome here, and an instance whose images 404 is listed with the
+	// image signal marked failed rather than quietly excluded. See
+	// instances.Probe.Compatible.
 	probe := s.prober.Probe(ctx, normalised)
-	if !probe.OK() {
+	if !probe.Compatible() {
 		detail := probe.Error
 		if detail == "" {
 			detail = "the instance did not pass its compatibility checks"
@@ -286,7 +291,11 @@ func (s *Server) handleRegisterInstance(w http.ResponseWriter, r *http.Request) 
 		VerifiedAt:    now,
 		LastProbe:     &probe,
 	}
-	record.RecordCheck(now, true)
+	// Only counted when the probe could actually observe something. See
+	// instances.Probe.Checkable.
+	if probe.Checkable() {
+		record.RecordCheck(now, probe.OK())
+	}
 
 	stored, added, err := s.repo.RegisterInstance(ctx, record)
 	if err != nil {

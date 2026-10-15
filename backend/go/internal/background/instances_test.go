@@ -133,8 +133,14 @@ func TestInstanceProbeNeverDeletes(t *testing.T) {
 		URL: "https://alt.example", RegisteredAt: now.Add(-72 * time.Hour),
 	})
 
+	// Reachable and well-formed, but its image does not resolve: the failure
+	// mode that must count against uptime.
+	broken := healthyAt(now)
+	broken.Images = false
+	broken.Error = "HEAD https://cdn.example/1.webp: 404"
+
 	prober := &fakeInstanceProber{results: map[string]instances.Probe{
-		"https://alt.example": {CheckedAt: now, Error: "dial tcp: connection refused"},
+		"https://alt.example": broken,
 	}}
 
 	job := InstanceProbe(data, prober, &recordingInstanceLog{})
@@ -157,6 +163,71 @@ func TestInstanceProbeNeverDeletes(t *testing.T) {
 	}
 	if log := (&recordingInstanceLog{}); log.count("instance index checked") != 0 {
 		t.Error("a fresh logger is not shared state")
+	}
+}
+
+// TestInstanceProbeSkipsAnEmptyCatalogue is the case that must not count.
+//
+// An instance with nothing uploaded is working exactly as configured. Recording
+// a failure against it every day would report 0% uptime for the one thing it has
+// no way to change, and would do it forever.
+func TestInstanceProbeSkipsAnEmptyCatalogue(t *testing.T) {
+	data, cleanup := instanceTestRepo(t)
+	defer cleanup()
+
+	now := time.Now().UTC()
+	seedInstanceRecord(t, data, instances.Record{URL: "https://alt.example", RegisteredAt: now})
+
+	empty := healthyAt(now)
+	empty.Images = false
+	empty.NoImages = true
+	empty.Error = "the instance returned no images to check"
+
+	prober := &fakeInstanceProber{results: map[string]instances.Probe{
+		"https://alt.example": empty,
+	}}
+
+	if err := InstanceProbe(data, prober, &recordingInstanceLog{}).Run(t.Context()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	stored := readInstance(t, data, "https://alt.example")
+	if stored.LastProbe == nil || stored.LastProbe.Error == "" {
+		t.Error("the outcome must still be recorded; it is what makes the signal explainable")
+	}
+	if len(stored.Checks) != 0 {
+		t.Errorf("checks = %+v, want none: nothing could be observed", stored.Checks)
+	}
+	if uptime := stored.Uptime(); uptime != nil {
+		t.Errorf("Uptime() = %v, want nil when no check ever ran", *uptime)
+	}
+}
+
+// TestInstanceProbeCountsAnUnreachableInstance is the other half.
+//
+// Down is observable, and it is what the uptime figure exists to report. Only the
+// empty catalogue is exempt, because nothing about that instance was wrong.
+func TestInstanceProbeCountsAnUnreachableInstance(t *testing.T) {
+	data, cleanup := instanceTestRepo(t)
+	defer cleanup()
+
+	now := time.Now().UTC()
+	seedInstanceRecord(t, data, instances.Record{URL: "https://alt.example", RegisteredAt: now})
+
+	prober := &fakeInstanceProber{results: map[string]instances.Probe{
+		"https://alt.example": {CheckedAt: now, Error: "dial tcp: connection refused"},
+	}}
+
+	if err := InstanceProbe(data, prober, &recordingInstanceLog{}).Run(t.Context()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	stored := readInstance(t, data, "https://alt.example")
+	if len(stored.Checks) != 1 || stored.Checks[0].OK {
+		t.Errorf("checks = %+v, want one failing entry: downtime is a real observation", stored.Checks)
+	}
+	if uptime := stored.Uptime(); uptime == nil || *uptime != 0 {
+		t.Errorf("Uptime() = %v, want 0 for a single failed check", uptime)
 	}
 }
 

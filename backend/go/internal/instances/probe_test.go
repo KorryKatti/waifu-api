@@ -147,7 +147,9 @@ func TestProberReadsAWorkingInstance(t *testing.T) {
 			t.Errorf("pageSize = %q, want 1; the probe must ask for one image, not a page", r.URL.Query().Get("pageSize"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"images":[{"id":1,"url":"%s/media/1.webp"}]}`, serverURL)
+		fmt.Fprintf(w, `{"items":[{"id":1,"extension":".webp","url":"%s/media/1.webp"}],`+
+			`"pageNumber":1,"totalPages":1,"totalCount":1,"hasNextPage":false,"hasPreviousPage":false}`,
+			serverURL)
 	})
 	mux.HandleFunc("/media/1.webp", func(w http.ResponseWriter, r *http.Request) {
 		imageHit = true
@@ -184,7 +186,8 @@ func TestProbeRecordsAnEmptyCatalogueAsUnusableByImages(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) { writeVersion(w) })
 	mux.HandleFunc("/images", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"images":[]}`))
+		_, _ = w.Write([]byte(`{"items":[],"pageNumber":1,"totalPages":0,"totalCount":0,` +
+			`"hasNextPage":false,"hasPreviousPage":false}`))
 	})
 
 	server := httptest.NewServer(mux)
@@ -209,7 +212,8 @@ func TestProbeCatchesAnImageThatDoesNotResolve(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) { writeVersion(w) })
 	mux.HandleFunc("/images", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"images":[{"id":1,"url":"https://cdn.example/gone.webp"}]}`))
+		_, _ = w.Write([]byte(`{"items":[{"id":1,"extension":".webp",` +
+			`"url":"https://cdn.example/gone.webp"}],"totalCount":1}`))
 	})
 
 	server := httptest.NewServer(mux)
@@ -357,4 +361,45 @@ func testProber() *HTTPProber {
 	prober := NewHTTPProber()
 	prober.allowBlocked = true
 	return prober
+}
+
+// TestParseImageListing pins the envelope this endpoint actually answers.
+//
+// The array is under "items" and the count is "totalCount", alongside the paging
+// fields a client reads. A fixture written from memory got this wrong once, and
+// every registration was then refused with a schema failure - so the exact bytes
+// are asserted here rather than approximated.
+//
+// The matching test in internal/httpapi feeds this function a response produced
+// by the real handler, which is what stops the two drifting apart again.
+func TestParseImageListing(t *testing.T) {
+	real := `{"items":[{"id":5497,"extension":".webp",` +
+		`"url":"https://cdn.example/5497.webp","width":1000,"height":1400}],` +
+		`"pageNumber":1,"totalPages":1,"totalCount":1,"maxPageSize":100,` +
+		`"defaultPageSize":30,"hasPreviousPage":false,"hasNextPage":false}`
+
+	url, err := ParseImageListing([]byte(real))
+	if err != nil {
+		t.Fatalf("ParseImageListing on the real response shape: %v", err)
+	}
+	if url != "https://cdn.example/5497.webp" {
+		t.Errorf("url = %q, want the first entry's url", url)
+	}
+
+	if _, err := ParseImageListing([]byte(`{"images":[{"url":"x"}]}`)); err == nil {
+		t.Error(`an "images" array was accepted; the endpoint answers "items", and ` +
+			`accepting both would mean a real shape change passed silently`)
+	}
+	if _, err := ParseImageListing([]byte(`{"items":[{"url":"x"}]}`)); err == nil {
+		t.Error("a listing with no totalCount was accepted")
+	}
+	if _, err := ParseImageListing([]byte(`not json`)); err == nil {
+		t.Error("a non-JSON body was accepted")
+	}
+	// The empty case needs its own sentinel, because the handler tells the two
+	// apart: a well-formed empty catalogue leaves the schema signal true, while
+	// a parse failure leaves it false.
+	if _, err := ParseImageListing([]byte(`{"items":[],"totalCount":0}`)); err != errEmptyCatalogue {
+		t.Errorf("an empty listing returned %v, want the empty-catalogue sentinel", err)
+	}
 }

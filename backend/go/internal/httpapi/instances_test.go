@@ -511,3 +511,77 @@ func TestConcurrentRegistrationsAllSurvive(t *testing.T) {
 			len(listed.Instances), registrations, names)
 	}
 }
+
+// TestImageListingShapeMatchesTheProbe is the test that would have caught the
+// bug this page exists to prevent.
+//
+// The prober reads GET /images to decide whether an instance is usable, and it
+// reads it from instances.ParseImageListing. That function was written against a
+// fixture encoding `{"images": [...]}` while the endpoint answers
+// `{"items": [...], "totalCount": ..., ...}` — so every registration, including
+// this instance's own, was refused with a schema failure, and the prober's own
+// tests passed because they encoded the same mistake.
+//
+// Feeding this function a response the real handler produced closes the gap: the
+// two can no longer agree on a shape that does not exist.
+//
+// It is deliberately not a copy of a fixture. A fixture is a second place to be
+// wrong.
+func TestImageListingShapeMatchesTheProbe(t *testing.T) {
+	h := newHarness(t)
+
+	seededImage{Width: 100, Height: 140, ByteSize: 10, Extension: ".webp",
+		ReviewStatus: 1}.insert(t, h)
+
+	resp := h.request(http.MethodGet, "/images?pageSize=1", "", nil, "")
+	body := readAll(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /images = %d, want 200: %s", resp.StatusCode, body)
+	}
+
+	imageURL, err := instances.ParseImageListing(body)
+	if err != nil {
+		t.Fatalf("the probe cannot read this service's own image listing: %v\n%s", err, body)
+	}
+	if imageURL == "" {
+		t.Error("the listing parsed but carried no url")
+	}
+}
+
+// TestImageListingParseFailureLeavesSchemaFalse pins the other half of the
+// distinction the handler makes: a well-formed empty catalogue is not a broken
+// one, and a broken one is not empty.
+func TestImageListingParseFailureLeavesSchemaFalse(t *testing.T) {
+	h := newHarness(t)
+	admin := h.issueToken(9210, config.RoleAdmin)
+
+	// An empty catalogue is the only state that produces a reachable instance
+	// with no image to check. NoImages is what distinguishes "we could not check"
+	// from "the check failed", so it has to be set or the instance is scored as
+	// broken for the one thing it cannot change.
+	h.prober.result = workingProbe()
+	h.prober.result.Images = false
+	h.prober.result.Schema = true
+	h.prober.result.NoImages = true
+
+	if code, raw := register(t, h, admin, "https://empty.example", "empty", "123456789"); code != http.StatusCreated {
+		t.Fatalf("register = %d: %s", code, raw)
+	}
+
+	_, raw := getInstanceList(t, h, "")
+	var listed publicList
+	if err := json.Unmarshal(raw, &listed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	entry := listed.Instances[0]
+	if entry["schema"] != true {
+		t.Errorf("schema = %v, want true: an empty catalogue is well-formed", entry["schema"])
+	}
+	if entry["images"] != false {
+		t.Errorf("images = %v, want false: there is no image to serve", entry["images"])
+	}
+	if entry["uptime"] != nil {
+		t.Errorf("uptime = %v, want null: a first check that failed is not an uptime figure", entry["uptime"])
+	}
+}

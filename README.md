@@ -41,6 +41,41 @@
 | Uploads | Open. Discord login required; images enter a review queue |
 | Users | Discord OAuth works. Existing accounts did not carry over |
 
+### Running your own
+
+Anyone can host their own copy, and any instance that answers the three requests
+below is listed on a public index with the signals shown individually. There is
+no score and no ranking: a single number hides its own weights, and the person it
+is about is the one who would have to trust it.
+
+**What an instance has to expose:**
+
+| Check | Request | Requirement |
+| --- | --- | --- |
+| Handshake | `GET /version` | JSON naming `software`. Must answer with **no database and no credentials** — a checker has nothing to authenticate with. |
+| Catalogue | `GET /images?pageSize=1` | The array is under **`items`**, and **`totalCount`** must be present. An empty catalogue is allowed. |
+| Images serve | `HEAD` the `url` that listing returned | It has to resolve. |
+
+That third one is the check nothing else substitutes for. It exercises the
+`Image.Extension` ↔ `{id}{ext}` key invariant end to end, and it is the only
+thing that catches an instance whose catalogue points at objects the bucket does
+not hold — `/version` and `/images` both answer perfectly in that situation.
+
+`GET /version` also reports `commit` and `builtAt`. The commit is how the index
+tells a fork from this codebase; `builtAt` is how it tells a deployment that has
+been standing still for months. Neither is required, and a commit that resolves
+nowhere reads *could not tell* rather than *behind*.
+
+**To get listed:** ask in the Discord server. The bot runs when the operator has
+it running, which is most of the time not — so ask once in the server rather than
+messaging anyone directly, and someone will run `/register` when they are around.
+Registration is not self-service because the API makes an outbound request to the
+URL it is given, and that has to be checked server-side before anything is
+dialled.
+
+Partial instances are explicitly welcome, and image count is deliberately not a
+signal. Serving one image is exactly as valid as serving ten thousand.
+
 ## ⚡ Choosing a host
 
 The two hosts are not interchangeable.
@@ -222,6 +257,7 @@ Adminer or the Supabase dashboard.
 - [`AGENTS.md`](AGENTS.md) — deployment fields, connection-string traps, CORS, duplicate threshold
 - [`scripts/mirror/README.md`](scripts/mirror/README.md) — database import, archive mirroring
 - [`bot/README.md`](bot/README.md) — sample Discord bot
+- [`docs/docs/instances.mdx`](docs/docs/instances.mdx) — what an instance must expose to be listed
 
 ## License
 

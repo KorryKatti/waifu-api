@@ -65,10 +65,14 @@ func InstanceProbe(data *repo.Repo, prober InstanceProber, log Logger) Job {
 				probe := prober.Probe(ctx, record.URL)
 				prober.ResolveUpstream(&probe, now)
 
-				// The window is pruned by RecordCheck, so a month of history
-				// costs one entry per day rather than growing forever.
+				// A run that could not observe anything is not counted, rather
+				// than counted as a failure: an instance with an empty catalogue
+				// would otherwise record one every day and report 0% uptime for
+				// the one thing it has no way to change.
 				stored := record
-				stored.RecordCheck(now, probe.OK())
+				if probe.Checkable() {
+					stored.RecordCheck(now, probe.OK())
+				}
 
 				if err := data.UpdateInstance(ctx, record.URL, func(entry *instances.Record) {
 					entry.LastProbe = &probe
