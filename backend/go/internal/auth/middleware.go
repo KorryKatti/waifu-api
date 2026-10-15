@@ -74,6 +74,24 @@ func (a *Authenticator) Authenticate(ctx context.Context, authorizationHeader, a
 			return nil, fmt.Errorf("%w: %v", ErrUnauthorized, err)
 		}
 
+		// A JWT cannot be revoked, so a ban has to be read from the database on
+		// every authenticated request. That is the cost BlacklistMiddleware
+		// already pays in the C# service, and matching it is what makes a ban
+		// take effect now rather than at the next login.
+		//
+		// A lookup error is returned rather than treated as "not banned": a
+		// database that cannot answer the question has not answered it, and
+		// granting the principal on a failed check would fail open.
+		if lookup != nil {
+			blacklisted, err := lookup.IsUserBlacklisted(ctx, claims.UserID)
+			if err != nil {
+				return nil, fmt.Errorf("check blacklist: %w", err)
+			}
+			if blacklisted {
+				return nil, fmt.Errorf("%w: this account is blacklisted", ErrForbidden)
+			}
+		}
+
 		return &Principal{
 			UserID:    claims.UserID,
 			Name:      claims.Name,
@@ -92,6 +110,14 @@ func (a *Authenticator) Authenticate(ctx context.Context, authorizationHeader, a
 // UserLookup resolves an API key hash to its owner.
 type UserLookup interface {
 	GetUserByAPIKeyHash(ctx context.Context, hash string) (APIKeyOwner, error)
+
+	// IsUserBlacklisted reports whether an account is banned.
+	//
+	// The token path needs this because a JWT carries no revocation state: a
+	// banned user's token stays cryptographically valid until it expires, so
+	// without this lookup BlacklistMiddleware's guarantee does not exist on
+	// this side of the port.
+	IsUserBlacklisted(ctx context.Context, userID int64) (bool, error)
 }
 
 // APIKeyOwner is the information needed to build a Principal from an API key.

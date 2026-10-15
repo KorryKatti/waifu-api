@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"waifuapi/internal/auth"
@@ -251,6 +252,110 @@ func TestExpiredAPIKeyIsNotAChallenge(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("an expired API key authenticated: GET /users/me returned %d", resp.StatusCode)
 	}
+}
+
+// TestBlacklistedJWTIsRefused is the case the API-key test above cannot reach.
+//
+// A JWT is self-contained: it verifies against the signature and nothing else,
+// so it carries no record of a ban. Unless the blacklist is read from the
+// database on the way in, a banned account keeps every capability it had for as
+// long as the token lives. C# pays that lookup on every authenticated request
+// in BlacklistMiddleware, and that is what has to hold here too.
+func TestBlacklistedJWTIsRefused(t *testing.T) {
+	h := newHarness(t)
+
+	ctx := context.Background()
+	const userID = 7373
+
+	_, err := h.db.Pool().Exec(ctx, `
+        INSERT INTO "Users" ("Id", "DiscordId", "Name", "Role",
+                         "IsBlacklisted", "RequestCount", "JwtRequestCount", "ApiKeyRequestCount")
+        VALUES ($1, $2, $3, $4, true, 0, 0, 0)`,
+		userID, "discord-jwt-banned", "jwtbanned", int(config.RoleUser))
+	if err != nil {
+		t.Fatalf("seed blacklisted user: %v", err)
+	}
+
+	token := h.issueToken(userID, config.RoleUser)
+
+	// Public first: BlacklistMiddleware has no [Authorize] exemption, so a ban
+	// has to apply to reads as well as writes.
+	resp := h.request(http.MethodGet, "/images", token, nil, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("GET /images as a blacklisted JWT caller: expected 403, got %d; "+
+			"the blacklist is not being consulted on the token path", resp.StatusCode)
+	}
+
+	// And protected, which must refuse rather than challenge.
+	resp = h.request(http.MethodGet, "/users/me", token, nil, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("GET /users/me as a blacklisted JWT caller: expected 403, got %d", resp.StatusCode)
+	}
+}
+
+// TestBlacklistedJWTIsRefusedForEveryRole guards against the check being applied
+// only to ordinary users. A ban is on the account, not the role it holds.
+func TestBlacklistedJWTIsRefusedForEveryRole(t *testing.T) {
+	h := newHarness(t)
+
+	for _, role := range []config.Role{config.RoleTrustedUser, config.RoleModerator, config.RoleAdmin} {
+		t.Run(role.String(), func(t *testing.T) {
+			id := int64(7400 + role)
+			_, err := h.db.Pool().Exec(context.Background(), `
+                INSERT INTO "Users" ("Id", "DiscordId", "Name", "Role",
+                                 "IsBlacklisted", "RequestCount", "JwtRequestCount", "ApiKeyRequestCount")
+                VALUES ($1, $2, $3, $4, true, 0, 0, 0)`,
+				id, fmt.Sprintf("discord-banned-%d", role), "banned", int(role))
+			if err != nil {
+				t.Fatalf("seed blacklisted %s: %v", role, err)
+			}
+
+			resp := h.request(http.MethodGet, "/users/me", h.issueToken(id, role), nil, "")
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("blacklisted %s: expected 403, got %d", role, resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestAPIKeyDescriptionMinimumLength pins the validator rule the port dropped.
+//
+// CreateApiKeyRequestValidator sets MinimumLength(3). A client written against
+// the reference implementation sends a short description and is told no; this
+// service was accepting it and handing back a working key.
+func TestAPIKeyDescriptionMinimumLength(t *testing.T) {
+	h := newHarness(t)
+	token := h.issueToken(3, config.RoleUser)
+
+	posting := func(description string) *http.Response {
+		return h.request(http.MethodPost, "/auth/api-keys", token,
+			strings.NewReader(fmt.Sprintf(`{"description":%q}`, description)),
+			"application/json")
+	}
+
+	t.Run("too short is rejected", func(t *testing.T) {
+		for _, description := range []string{"k", "ke"} {
+			resp := posting(description)
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("description %q: expected 400, got %d", description, resp.StatusCode)
+			}
+		}
+	})
+
+	t.Run("three characters is accepted", func(t *testing.T) {
+		resp := posting("key")
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusCreated {
+			t.Errorf("description %q: expected 201, got %d", "key", resp.StatusCode)
+		}
+	})
 }
 
 // ensure fmt stays referenced if the helpers above change shape.

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -287,6 +288,10 @@ type createAPIKeyRequest struct {
 	ExpiresInDays int `json:"expiresInDays"`
 }
 
+// minAPIKeyDescriptionLength matches the MinimumLength(3) rule on
+// CreateApiKeyRequestValidator.Description.
+const minAPIKeyDescriptionLength = 3
+
 // handleCreateAPIKey serves POST /api-keys.
 //
 // The plaintext key is generated here and returned once. Only its SHA-256 hash
@@ -308,6 +313,21 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, r, apierror.UnprocessableEntity("A description is required.").
 			WithExtra("errors", map[string][]string{
 				"Description": {"A description is required."}}))
+		return
+	}
+
+	// CreateApiKeyRequestValidator sets MinimumLength(3) on Description, so the
+	// C# service answers 400 for a shorter one. Without this the two disagree on
+	// the same request: a client written against the reference implementation
+	// gets a rejection there and a created key here.
+	//
+	// The message is matched too, because it is the only thing in the response
+	// a client sees and it is asserted on.
+	if len([]rune(description)) < minAPIKeyDescriptionLength {
+		writeAPIError(w, r, apierror.BadRequest("See errors property for details.").
+			WithExtra("errors", map[string][]string{
+				"Description": {fmt.Sprintf("Description must be at least %d characters long.",
+					minAPIKeyDescriptionLength)}}))
 		return
 	}
 

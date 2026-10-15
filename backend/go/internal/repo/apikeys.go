@@ -12,6 +12,32 @@ import (
 	"waifuapi/internal/store/models"
 )
 
+// IsUserBlacklisted reports whether an account is banned.
+//
+// This is the lookup BlacklistMiddleware performs in the C# service, which runs
+// on every authenticated request. A JWT carries no revocation state, so this is
+// the only way a ban can take effect before the token expires.
+func (r *Repo) IsUserBlacklisted(ctx context.Context, userID int64) (bool, error) {
+	var blacklisted bool
+
+	err := r.db.QueryRow(ctx,
+		`SELECT "IsBlacklisted" FROM "Users" WHERE "Id" = $1`, userID).Scan(&blacklisted)
+	if err != nil {
+		// No row is not a blacklist. BlacklistMiddleware does FirstOrDefaultAsync
+		// and passes the request through when the result is null, so matching it
+		// means a token naming an absent user is not banned here either.
+		//
+		// Whether such a token should still be honoured is a separate question
+		// from whether this port matches, and answering it here would change
+		// behaviour for a case the reference service does not refuse.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return blacklisted, nil
+}
+
 // GetUserByAPIKeyHash resolves a hashed API key to its owner.
 //
 // It is the auth.UserLookup implementation, kept here because it is a database
