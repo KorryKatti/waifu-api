@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -269,6 +270,45 @@ func TestUpdateAPIKeyIsOwnerScoped(t *testing.T) {
 	}
 
 	_ = theirs
+}
+
+// TestListAPIKeysReturnsABareArray pins the response shape of GET /auth/api-keys.
+//
+// This endpoint returned {"result": [...]} while the C# service returns a bare
+// array - AuthController does `Ok(keys)` on a List<ApiKeyDto> - and the frontend
+// destructures the response straight into ApiKeyDto[]. So the API keys page
+// crashed on keys.map with the envelope, in production, for as long as the port
+// had been live.
+//
+// The assertion is a decode into a slice rather than a substring search, and that
+// is the whole point: the test above this one checks for `"description":"mine"`
+// in the body, which is satisfied by either shape. A test written that way is
+// blind to exactly the class of bug that broke the page.
+func TestListAPIKeysReturnsABareArray(t *testing.T) {
+	h := newHarness(t)
+	token := h.issueToken(53, config.RoleUser)
+	h.keyID(t, token, "shape check")
+
+	raw := readAll(t, h.request("GET", "/auth/api-keys", token, nil, "")) //nolint:bodyclose
+
+	var keys []map[string]any
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("GET /auth/api-keys did not return a JSON array: %v\n%s", err, raw)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("got %d keys, want 1: %s", len(keys), raw)
+	}
+	if keys[0]["description"] != "shape check" {
+		t.Errorf("description = %v, want %q", keys[0]["description"], "shape check")
+	}
+
+	// An empty list has to be [] and not null, for the same reason: the page
+	// maps over whatever it gets.
+	token = h.issueToken(54, config.RoleUser)
+	empty := readAll(t, h.request("GET", "/auth/api-keys", token, nil, "")) //nolint:bodyclose
+	if strings.TrimSpace(string(empty)) != "[]" {
+		t.Errorf("an empty listing = %s, want []", empty)
+	}
 }
 
 // TestUpdateAPIKeyValidatesDescription covers the empty case.

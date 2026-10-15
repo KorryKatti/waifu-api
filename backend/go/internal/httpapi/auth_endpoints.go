@@ -269,7 +269,14 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	for _, key := range keys {
 		dtos = append(dtos, toAPIKeyDto(key))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"result": dtos})
+
+	// A bare array, because that is what AuthController returns: `Ok(keys)`
+	// serialises List<ApiKeyDto> with no envelope. The frontend destructures the
+	// response straight into ApiKeyDto[], so wrapping it in {"result": ...} gave
+	// that page an object where it expected an array, and it died on
+	// keys.map - a crash on a working feature that no Go test could see,
+	// because the response was well-formed and only disagreed with the contract.
+	writeJSON(w, http.StatusOK, dtos)
 }
 
 // createAPIKeyRequest is the POST body.
