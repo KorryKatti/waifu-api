@@ -5,6 +5,8 @@ import asyncio
 import random
 import time
 import urllib.parse
+import traceback
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -55,12 +57,44 @@ NSFW_CHANNELS = {int(c) for c in os.getenv("NSFW_CHANNELS", "").split(",") if c.
 #
 # Every other command here is anonymous, because every other endpoint is. This
 # one is not: registering an instance is admin-gated, because the backend makes
-# an outbound HTTP request to whatever URL it is given. So the token belongs to
-# an admin account, and the bot is the only writer of the index.
+# an outbound HTTP request to whatever URL it is given. So this belongs to an
+# admin account, and the bot is the only writer of the index.
+#
+# An API key rather than a JWT, deliberately. A JWT is signed with the service's
+# signing key and expires in 24 hours, so a bot holding one needs a new one daily
+# and fails quietly when it lapses. An API key is stored hashed, is revocable from
+# the dashboard, and does not expire unless it is created with an expiry - which
+# is what a service credential should be. It is revocable rather than expiring,
+# because revocation is the property that matters to a credential sitting in an
+# environment file for the life of the bot.
+#
+# Create it once, as an admin, with:
+#   POST /auth/api-keys  {"description": "waifu bot", "expiresInDays": 0}
+# The plaintext is returned once and cannot be recovered.
 #
 # Point it at the API host rather than the Worker: the Worker forwards
-# Authorization but the endpoint has to reach the origin to store anything.
-ADMIN_TOKEN = os.getenv("WAIFU_ADMIN_TOKEN", "").strip()
+# Authorization but drops X-Api-Key, so a key sent through it is silently
+# anonymous.
+ADMIN_API_KEY = os.getenv("WAIFU_ADMIN_API_KEY", "").strip()
+
+
+def redact(text: str) -> str:
+    """Strip the admin key from any string on its way to a log or a message.
+
+    No code path here puts the key into a third-party string: the request log
+    line carries method, path, status and duration and never headers, and the key
+    is sent as a request header. So today this is defence in depth rather than a
+    fix for an observed leak.
+
+    It stays because the cost of being wrong is a permanent, non-expiring write
+    credential in somebody's log file, and because an HTTP library putting request
+    headers into an exception message is exactly the kind of thing that changes
+    without warning in a patch release. Scrubbing at the boundary means that
+    possibility costs nothing.
+    """
+    if ADMIN_API_KEY and ADMIN_API_KEY in text:
+        return text.replace(ADMIN_API_KEY, "[redacted]")
+    return text
 
 # The role granted to somebody whose instance is on the index. Empty means no
 # grant, and the command says so rather than appearing to have worked.
@@ -277,7 +311,7 @@ async def api_post_instances(url, *, name=None, discord_user_id=""):
             endpoint,
             json=payload,
             timeout=aiohttp.ClientTimeout(total=REGISTER_TIMEOUT_SECONDS),
-            headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+            headers={"X-Api-Key": ADMIN_API_KEY},
         ) as resp:
             body = await resp.json(content_type=None) if resp.content_type == "application/json" else {}
             if resp.status >= 400:
@@ -361,11 +395,11 @@ async def waifu(ctx, *, query: str = ""):
         try:
             data = await fetch_images(**params)
         except WaifuApiError as e:
-            await ctx.reply(str(e))
+            await ctx.reply(redact(str(e)))
             return
         except Exception as e:
-            log.exception("image fetch failed")
-            await ctx.reply(f"Could not reach the waifu API: {e}")
+            log.error("%s", redact(traceback.format_exc()))
+            await ctx.reply(f"Could not reach the waifu API: {redact(str(e))}")
             return
 
     items = data.get("items") or []
@@ -421,7 +455,7 @@ async def gallery(ctx):
         try:
             data = await fetch_images(**params)
         except Exception as e:
-            await ctx.reply(f"Could not reach the waifu API: {e}")
+            await ctx.reply(f"Could not reach the waifu API: {redact(str(e))}")
             return
     items = data.get("items") or []
     if not items:
@@ -440,7 +474,7 @@ async def tags(ctx):
     try:
         data = await api_get("tags")
     except Exception as e:
-        await ctx.reply(f"Could not reach the waifu API: {e}")
+        await ctx.reply(f"Could not reach the waifu API: {redact(str(e))}")
         return
 
     body = "\n".join(
@@ -550,9 +584,9 @@ async def register_instance(
     the result is about the caller's own instance and there is no reason for
     anyone else to see it.
     """
-    if not ADMIN_TOKEN:
+    if not ADMIN_API_KEY:
         await interaction.response.send_message(
-            "This bot is not configured to register instances. Set WAIFU_ADMIN_TOKEN "
+            "This bot is not configured to register instances. Set WAIFU_ADMIN_API_KEY "
             "on it and try again.",
             ephemeral=True,
         )
@@ -570,10 +604,10 @@ async def register_instance(
             detail = "This bot is not allowed to register instances."
         elif e.status == 422:
             detail = f"Your instance did not answer correctly.\n{detail}"
-        await interaction.followup.send(detail, ephemeral=True)
+        await interaction.followup.send(redact(detail), ephemeral=True)
         return
     except Exception:
-        log.exception("register failed")
+        log.error("%s", redact(traceback.format_exc()))
         await interaction.followup.send(
             "Could not reach the API. Nothing was changed.", ephemeral=True
         )
@@ -619,7 +653,7 @@ async def on_ready():
         synced = await bot.tree.sync()
         log.info("synced %d slash commands", len(synced))
     except Exception:
-        log.exception("slash command sync failed")
+        log.error("%s", redact(traceback.format_exc()))
 
     bot.loop.create_task(update_status())
     bot.loop.create_task(probe_api())
@@ -841,7 +875,7 @@ async def update_status():
                 activity=discord.Activity(name=name, type=activity_type)
             )
         except Exception as e:
-            log.warning("status update failed: %s", e)
+            log.warning("status update failed: %s", redact(str(e)))
 
         slot += 1
 
@@ -879,7 +913,7 @@ async def probe_api():
                 STATS["artists"] = counts.get("totalArtists")
                 last_counts = time.monotonic()
         except Exception as e:
-            log.warning("probe failed: %s", e)
+            log.warning("probe failed: %s", redact(str(e)))
         await asyncio.sleep(PROBE_SECONDS)
 
 

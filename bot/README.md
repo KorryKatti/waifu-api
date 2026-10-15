@@ -75,8 +75,30 @@ The bot sends its own admin credentials and the caller's numeric Discord id. It
 never sends a username - usernames still resolve to a different account after a
 rename, so keying an entry or a role on one hands both to whoever took the name.
 
-Set `WAIFU_ADMIN_TOKEN` and `INSTANCE_OPERATOR_ROLE` to enable it; see
+Set `WAIFU_ADMIN_API_KEY` and `INSTANCE_OPERATOR_ROLE` to enable it; see
 [Config](#config).
+
+### The admin key
+
+`/register` needs the bot to be allowed to write, so the bot holds a key belonging
+to an admin account. While logged in as an admin:
+
+```
+POST /auth/api-keys   {"description": "waifu bot", "expiresInDays": 0}
+```
+
+`expiresInDays: 0` means it does not expire. The plaintext is returned once and
+only its hash is stored, so a lost key is replaced rather than recovered, and it
+is deleted from the same screen.
+
+An API key rather than a JWT, because a JWT would need re-minting every 24 hours
+and the bot would fail quietly when it lapsed. A key is revocable, and
+revocation is the property that matters for something sitting in an environment
+file for the life of the bot.
+
+The bot sends it as `X-Api-Key`. It must not go through the Worker: the Worker
+forwards `Authorization` but drops `X-Api-Key`, so a key sent that way is
+silently anonymous and every registration fails as forbidden.
 
 ## The status line
 
