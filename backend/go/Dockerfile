@@ -36,18 +36,21 @@ COPY . .
 #
 # They cannot be derived from the source: the build context is this directory and
 # .git lives at the repository root, so no VCS metadata is present to read.
-# Whoever builds passes them:
 #
-#   docker build --build-arg VERSION=7.12.0 --build-arg COMMIT=$(git rev-parse --short HEAD) .
+# COMMIT needs no configuration on Render. Render translates every service
+# environment variable into a Docker build argument and sets RENDER_GIT_COMMIT
+# itself, so falling back to it means the commit is stamped correctly on every
+# deploy without anyone maintaining a variable that drifts. An explicit COMMIT
+# still wins, which is what a local build or a release pipeline wants.
 #
-# BUILT_AT falls back to the moment this layer is built, so it needs no CI
-# cooperation. The substitution happens inside the RUN rather than in the ARG
-# default, because an ARG default is fixed at parse time — every build would
-# report the date the Dockerfile was written.
+# VERSION has no automatic source, so it stays a literal: it names a release, not
+# a build, and it is displayed rather than scored.
 ARG VERSION=0.0.0-dev
 ARG COMMIT=unknown
+ARG RENDER_GIT_COMMIT=
 ARG BUILT_AT=
-RUN BUILT_AT="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
+RUN COMMIT="${RENDER_GIT_COMMIT:-$COMMIT}" && \
+    BUILT_AT="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
     CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
       -ldflags="-s -w \
