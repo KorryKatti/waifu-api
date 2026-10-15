@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import api from '../services/api';
 import { MetaTags } from '../hooks/useMetaTags';
+import { getEnv } from '../utils/env';
 import { Server, CheckCircle2, XCircle, HelpCircle, Clock } from 'lucide-react';
 
 // The instance index: other people's deployments of this software, and whether
@@ -104,6 +105,43 @@ function checkAge(checkedAt: string | null): string {
     return `checked ${Math.floor(hours / 24)}d ago`;
 }
 
+// RegisterHint is the only place the page tells someone how to get on it.
+//
+// It is worded the way it is because the bot is not always running. A page that
+// just said "run /register" would have somebody waiting for a command that never
+// arrives, then trying to DM somebody about it. Saying the bot is off most of the
+// time, and that the Discord is the right place to ask, sets that up front -
+// which is also why it links to the server rather than offering a contact route.
+const RegisterHint = () => {
+    const discordServerUrl = getEnv('VITE_DISCORD_SERVER_URL');
+
+    const body = (
+        <>
+            Ask in the{' '}
+            {discordServerUrl ? (
+                <a
+                    href={discordServerUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                >
+                    Discord server
+                </a>
+            ) : (
+                'Discord server'
+            )}{' '}
+            and someone will run <code>/register</code> for you.
+        </>
+    );
+
+    return (
+        <span>
+            {body} The bot is only up when the operator has it running, so it will
+            not answer straight away &mdash; no need to DM anyone or ask twice.
+        </span>
+    );
+};
+
 const Instances = () => {
     const [instances, setInstances] = useState<Instance[]>([]);
     const [loading, setLoading] = useState(true);
@@ -158,7 +196,7 @@ const Instances = () => {
                     <Server size={40} className="mx-auto mb-4 text-muted-foreground" />
                     <p className="text-muted-foreground">No instances have been registered yet.</p>
                     <p className="text-sm text-muted-foreground mt-2">
-                        Running one? Register it in the Discord server with <code>/register</code>.
+                        Running one? <RegisterHint />
                     </p>
                 </div>
             )}
@@ -248,10 +286,15 @@ const Instances = () => {
                 ))}
             </div>
 
-            <p className="text-center text-sm text-muted-foreground mt-10">
-                Partial instances are welcome. Nothing here is scored, and an instance that serves one image
-                is exactly as valid as one that serves ten thousand.
-            </p>
+            <div className="mt-10 text-center text-sm text-muted-foreground space-y-2">
+                <p>
+                    Partial instances are welcome. Nothing here is scored, and an instance that serves one image
+                    is exactly as valid as one that serves ten thousand.
+                </p>
+                <p>
+                    Running your own? <RegisterHint />
+                </p>
+            </div>
         </div>
     );
 };

@@ -67,10 +67,18 @@ have to live in the package that reads them. A build that loses the flag still
 produces a working image that reports `0.0.0-dev` forever.
 
 **The build context is `backend/go` and `.git` is at the repository root**, so no
-VCS metadata exists to read. `VERSION` and `COMMIT` must be passed in by whoever
-builds. `BUILT_AT` defaults to the build time via `$(date -u)` inside the `RUN`,
-never via an `ARG` default — that is fixed at parse time and would report the
-date the Dockerfile was written.
+VCS metadata exists to read. `COMMIT` comes from `RENDER_GIT_COMMIT`, which Render
+sets and translates into a build argument automatically; an explicit `COMMIT` still
+wins for local builds. `VERSION` names a release and stays a literal. `BUILT_AT`
+defaults to the build time via `$(date -u)` inside the `RUN`, never via an `ARG`
+default — that is fixed at parse time and would report the date the Dockerfile was
+written.
+
+**Render passes every service environment variable to the build as an argument**,
+secrets included. The Dockerfile declares only `VERSION`, `COMMIT` and
+`RENDER_GIT_COMMIT`, so an undeclared one is inert and cannot reach the image.
+Verified by building with a secret as a build argument and searching the resulting
+binary. **Never declare an `ARG` for a credential**, even briefly.
 
 The "Build and smoke-test image" job asserts the stamps reached the binary. That
 job runs with `defaults.run.working-directory: backend/go`, so its build context
@@ -79,8 +87,8 @@ is `.`, not `backend/go`.
 ## The instance index
 
 `GET /instances` lists other people's deployments and whether each one is
-serving its own images. The design and its reasoning are in
-`plans/instance-index.md`; these are the rules a change has to respect.
+serving its own images. What an instance has to expose to be listed is in
+`docs/docs/instances.mdx`, and these are the rules a change has to respect.
 
 **The list lives in one JSONB row, and read-modify-write needs the lock.**
 `repo.UpdateInstances` wraps the read in a transaction holding `FOR UPDATE` on
