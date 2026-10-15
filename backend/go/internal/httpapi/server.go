@@ -97,6 +97,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+base+"ping", s.handlePing)
 	mux.HandleFunc("HEAD "+base+"ping", s.handlePing)
 
+	// The instance handshake. Unauthenticated and database-free, so an instance
+	// can be recognised even when it is serving from a CDN with no API behind
+	// it. GET also answers HEAD.
+	mux.HandleFunc("GET "+base+"version", s.handleVersion)
+
 	s.registerImageRoutes(mux)
 	s.registerUploadRoutes(mux)
 	s.registerReviewRoutes(mux)

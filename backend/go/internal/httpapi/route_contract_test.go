@@ -96,6 +96,7 @@ func TestEveryServedRouteIsDeclared(t *testing.T) {
 	// here needs a reason to exist, recorded next to it.
 	knownExtras := map[string]string{
 		"GET /healthz": "operational liveness probe, deliberately not part of the public API",
+		"GET /version": "instance handshake: lets an operator or a checker recognise a deployment as running this software, with no database and no credentials",
 	}
 
 	// Every extra must actually be served, and must carry a recorded reason, so

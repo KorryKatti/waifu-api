@@ -78,7 +78,22 @@ func run() error {
 		"environment", cfg.Environment,
 		"port", cfg.Port,
 		"base_path", cfg.BasePathOrRoot(),
+		"version", httpapi.BuildVersion,
+		"commit", httpapi.BuildCommit,
+		"builtAt", httpapi.BuildAt,
 	)
+
+	// Logged rather than fatal. An unstamped binary still serves; it just cannot
+	// be told apart from a stale one by anything reading /version, and the build
+	// args are supplied by whoever deploys, which is outside this repository.
+	// The CI image smoke test asserts the opposite — that the stamps are present
+	// — so reaching production unstamped means the build args were not passed.
+	if !httpapi.Stamped() {
+		log.Warn("build identity was not stamped into this binary",
+			"version", httpapi.BuildVersion,
+			"commit", httpapi.BuildCommit,
+			"builtAt", httpapi.BuildAt)
+	}
 
 	// ---- Database ------------------------------------------------------
 	// A generous startup timeout: a cold database or a busy pooler can take a

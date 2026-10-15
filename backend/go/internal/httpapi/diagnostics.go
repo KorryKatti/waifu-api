@@ -160,15 +160,22 @@ func hostname() string {
 
 // buildInfo reports what went into the binary, which is the first thing asked
 // when a deployed version misbehaves.
+//
+// The identity comes from the link-time stamps in version.go rather than from
+// debug.ReadBuildInfo, so /healthz and /version cannot report two different
+// answers to "which version is this". ReadBuildInfo is still consulted for the
+// toolchain version and for vcs.revision / vcs.time, which the linker records
+// only when the build happened in a VCS checkout — a local `go build`, not the
+// Docker image, where .git is outside the build context.
 func buildInfo() map[string]any {
 	info := map[string]any{
 		"startedAt": time.Unix(0, startedAt.Load()).UTC().Format(time.RFC3339),
+		"version":   BuildVersion,
+		"commit":    BuildCommit,
+		"builtAt":   BuildAt,
 	}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		info["goVersion"] = bi.GoVersion
-		if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-			info["version"] = bi.Main.Version
-		}
 		for _, setting := range bi.Settings {
 			if setting.Key == "vcs.revision" {
 				info["vcsRevision"] = setting.Value

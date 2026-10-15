@@ -27,10 +27,33 @@ COPY . .
 # -s -w gives up the symbol table and DWARF. This makes stack traces much less
 # useful, so the binary is built WITHOUT those flags by default and they can be
 # re-enabled locally for debugging.
-ARG VERSION=0.0.0-local
-RUN CGO_ENABLED=0 GOOS=linux go build \
+#
+# The three stamps below are what GET /version reports, and what /healthz carries
+# for free. -X names a fully qualified symbol, so these paths are the import paths
+# of the package holding the variables, not package main. A -X naming a symbol
+# that does not exist is ignored by the linker with no error and no warning, so a
+# wrong path yields a working image that reports the defaults forever.
+#
+# They cannot be derived from the source: the build context is this directory and
+# .git lives at the repository root, so no VCS metadata is present to read.
+# Whoever builds passes them:
+#
+#   docker build --build-arg VERSION=7.12.0 --build-arg COMMIT=$(git rev-parse --short HEAD) .
+#
+# BUILT_AT falls back to the moment this layer is built, so it needs no CI
+# cooperation. The substitution happens inside the RUN rather than in the ARG
+# default, because an ARG default is fixed at parse time — every build would
+# report the date the Dockerfile was written.
+ARG VERSION=0.0.0-dev
+ARG COMMIT=unknown
+ARG BUILT_AT=
+RUN BUILT_AT="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
+    CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
-      -ldflags="-s -w -X main.version=${VERSION}" \
+      -ldflags="-s -w \
+        -X waifuapi/internal/httpapi.BuildVersion=${VERSION} \
+        -X waifuapi/internal/httpapi.BuildCommit=${COMMIT} \
+        -X waifuapi/internal/httpapi.BuildAt=${BUILT_AT}" \
       -o /out/server \
       ./cmd/server
 

@@ -56,6 +56,26 @@ image on the existing service is what keeps it working.
 
 Full record: `plans/cutover-validation-log.md`. Feature plans live in `plans/`.
 
+### Build identity is stamped, not derived
+
+`GET /version` reports `version`, `commit` and `builtAt` from package variables in
+`internal/httpapi`, set by `-ldflags` in both Dockerfiles.
+
+**`-X` takes a fully qualified symbol, and a wrong one is ignored with no
+error.** `main.version` resolves only for a var in package `main`; the variables
+have to live in the package that reads them. A build that loses the flag still
+produces a working image that reports `0.0.0-dev` forever.
+
+**The build context is `backend/go` and `.git` is at the repository root**, so no
+VCS metadata exists to read. `VERSION` and `COMMIT` must be passed in by whoever
+builds. `BUILT_AT` defaults to the build time via `$(date -u)` inside the `RUN`,
+never via an `ARG` default — that is fixed at parse time and would report the
+date the Dockerfile was written.
+
+The "Build and smoke-test image" job asserts the stamps reached the binary. That
+job runs with `defaults.run.working-directory: backend/go`, so its build context
+is `.`, not `backend/go`.
+
 ### Never point a local instance at the production database
 
 `background.runJob` runs each cleanup job **once at startup**, before its daily

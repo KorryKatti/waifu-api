@@ -163,8 +163,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The build args are passed deliberately, and the startup smoke test below
+      # asserts they reached the binary. A -X naming a symbol that does not exist
+      # is ignored by the linker with no error, so a build can lose its stamping
+      # and still produce a perfectly good image that reports 0.0.0-dev from
+      # /version forever. That is exactly the kind of silent no-op this repo
+      # keeps shipping, so the stamps are asserted rather than assumed.
+      #
+      # The context is "." rather than "backend/go": every step in this workflow
+      # runs in backend/go already, from the defaults block at the top, so the
+      # latter asked Docker for backend/go/backend/go and this job could not
+      # have built anything.
       - name: Build image
-        run: docker build -f Dockerfile -t waifu-api-go:ci backend/go
+        run: |
+          docker build -f Dockerfile -t waifu-api-go:ci \
+            --build-arg VERSION=9.9.9-ci-test \
+            --build-arg COMMIT=deadbee \
+            .
 
       # The service validates its configuration at startup and exits non-zero
       # on a bad configuration, so a smoke test has to supply every required
@@ -253,6 +268,34 @@ jobs:
           fi
 
           echo "Configuration accepted; failure is the expected unreachable database."
+
+      # The build args from the step above must be visible in the binary's own
+      # startup log, which is emitted before the database attempt. This is the
+      # assertion that a lost -ldflags fails CI instead of deploying an instance
+      # which reports itself as a development build for the rest of its life.
+      - name: Assert build identity reached the binary
+        run: |
+          set -o pipefail
+          output=$(docker run --rm --env-file /tmp/smoke.env waifu-api-go:ci 2>&1 || true)
+
+          for expected in 9.9.9-ci-test deadbee; do
+            if ! echo "$output" | grep -q "$expected"; then
+              echo "::error::$expected is not in the binary's build identity. The -X flags are silently ignored when they name a symbol that does not exist, so check the import path and variable name."
+              echo "$output"
+              exit 1
+            fi
+          done
+
+          # builtAt is not passed in, so there is nothing fixed to match on. Its
+          # presence is what distinguishes a stamped binary from one that fell
+          # back to the defaults, and the default is literally "unknown".
+          if echo "$output" | grep -q "build identity was not stamped"; then
+            echo "::error::The binary reports an unstamped build identity."
+            echo "$output"
+            exit 1
+          fi
+
+          echo "Build identity is stamped into the image."
 
       - name: Report image size
         run: |
