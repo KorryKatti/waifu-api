@@ -13,6 +13,10 @@
 -- keeps both. It is the last change of this kind; see
 -- internal/images/phash/MIGRATION.md.
 --
+-- A second: the InstanceIndex table, added 2026-10-15 for the instance list. It
+-- is a new table rather than a change to an existing one, which is why EF Core
+-- is unaffected. Both are documented where they are defined below.
+--
 -- Two details matter more than the rest and are easy to get wrong:
 --
 --   1. Images.PerceptualHash is bit(64), not text or bigint. The Go service
@@ -186,6 +190,33 @@ CREATE TABLE IF NOT EXISTS "DailyStats" (
 CREATE TABLE IF NOT EXISTS "GlobalStats" (
     "Key"   text   PRIMARY KEY,
     "Value" bigint NOT NULL
+);
+
+-- The instance index: one row, "Id" = 1, holding every registered instance as a
+-- JSONB array in "Instances". See plans/instance-index.md for why the list lives
+-- in a single JSON document rather than in rows.
+--
+-- This is the second deliberate exception to the frozen schema and the first to
+-- add a table rather than a column. It is safe for the reason
+-- Images.PerceptualHashLegacy was: EF Core reads the tables its model declares
+-- and never looks at this one, so the C# oracle cannot be affected by it and
+-- there is no migration to make on its side.
+--
+-- The row does not exist until something writes it. Reads treat its absence as
+-- an empty index rather than an error, so the table can be applied to a
+-- production database without a seeding statement.
+--
+-- There is no DEFAULT on either column: the id is always supplied explicitly,
+-- which is what makes the row a singleton rather than whatever happens to exist
+-- first.
+CREATE TABLE IF NOT EXISTS "InstanceIndex" (
+    "Id"        integer     NOT NULL PRIMARY KEY,
+    "Instances" jsonb       NOT NULL,
+    "UpdatedAt" timestamptz NOT NULL,
+
+    -- The singleton guard. A second row would be indistinguishable from a
+    -- migration having half-run, and reads would silently pick one of them.
+    CONSTRAINT "CK_InstanceIndex_Singleton" CHECK ("Id" = 1)
 );
 
 -- ---------------------------------------------------------------------------

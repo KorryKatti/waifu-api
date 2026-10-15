@@ -51,6 +51,35 @@ func TestSchemaMatchesEntityFrameworkModel(t *testing.T) {
 
 	got := parseSchemaSQL(readFile(t, "schema.sql"))
 
+	// Tables this service owns that the C# service does not declare.
+	//
+	// The comparison above is exact in both directions, which is what makes it
+	// worth trusting: a table in schema.sql that production does not have is an
+	// outage waiting for a deploy. So a deliberate addition has to be listed
+	// here with a reason, exactly as an invented route is listed in
+	// route_contract_test.go — the list cannot quietly grow, and every entry has
+	// to justify itself to whoever reads the diff.
+	//
+	// Each entry is checked in both directions: it must exist in schema.sql, so
+	// a stale entry is caught when the table is dropped, and it must not be in
+	// the EF snapshot, so an entry is caught once production really does have it.
+	goOnlyTables := map[string]string{
+		"InstanceIndex": "the instance index, added 2026-10-15. A new table rather than a change to an existing one, so EF Core cannot be affected: it reads the tables its model declares and never looks at this one. The row does not exist until something registers, and reads treat its absence as an empty index, so nothing has to seed it. APPLY THIS TABLE TO PRODUCTION before deploying code that reads it.",
+	}
+
+	for table, reason := range goOnlyTables {
+		if reason == "" {
+			t.Errorf("table %s is exempt from the production comparison with no recorded reason", table)
+		}
+		if _, ok := got[table]; !ok {
+			t.Errorf("table %s is listed as Go-owned but is not in schema.sql; drop it from the list", table)
+		}
+		if _, ok := want[table]; ok {
+			t.Errorf("table %s is listed as Go-only but is in the EF snapshot, so production has it; drop it from the list", table)
+		}
+		delete(got, table)
+	}
+
 	var problems []string
 	for table, columns := range want {
 		gotColumns, ok := got[table]
@@ -81,7 +110,8 @@ func TestSchemaMatchesEntityFrameworkModel(t *testing.T) {
 		t.Error(p)
 	}
 	if len(problems) == 0 {
-		t.Logf("schema.sql agrees with production on %d tables", len(want))
+		t.Logf("schema.sql agrees with production on %d tables, plus %d owned by this service",
+			len(want), len(goOnlyTables))
 	}
 }
 

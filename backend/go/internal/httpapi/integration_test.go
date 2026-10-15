@@ -119,6 +119,13 @@ type harness struct {
 	// mux is kept so route-contract tests can ask which pattern a probe request
 	// resolves to, rather than inferring the route table from the handlers.
 	mux *http.ServeMux
+	// prober is the stand-in for outbound instance checks. It is exposed so a
+	// test can say what an instance answers; the real one would make network
+	// requests, which the integration suite cannot do.
+	prober *fakeProber
+	// data is the repository, for tests that assert on stored state rather than
+	// on a response — an index whose races only show up in the row.
+	data *repo.Repo
 }
 
 // newHarness builds an API server backed by the test database.
@@ -202,7 +209,8 @@ func newHarnessWithConfig(t *testing.T, mutate func(*config.Config)) *harness {
 		RedirectURI:  "http://localhost/auth/callback",
 	}, "http://127.0.0.1:1")
 
-	api := httpapi.NewServer(cfg, db, data, log, files, discordClient, tokens, nil)
+	prober := newFakeProber(nil)
+	api := httpapi.NewServer(cfg, db, data, log, files, discordClient, tokens, nil, prober)
 
 	mux := http.NewServeMux()
 	api.Register(mux)
@@ -211,7 +219,8 @@ func newHarnessWithConfig(t *testing.T, mutate func(*config.Config)) *harness {
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)
 
-	return &harness{t: t, server: httpServer, store: files, db: db, mux: mux}
+	return &harness{t: t, server: httpServer, store: files, db: db, mux: mux,
+		prober: prober, data: data}
 }
 
 // testConfig returns a configuration with permissive but explicit review rules,
@@ -279,7 +288,7 @@ func truncateAll(t *testing.T, db *store.DB) {
 	const statement = `
         TRUNCATE "Images", "Tags", "Artists", "ImageTag", "ArtistImage", "Users",
                  "ReviewTasks", "SiteBanners", "ApiKeys", "Albums", "AlbumItems",
-                 "Reports", "DailyStats", "GlobalStats"
+                 "Reports", "DailyStats", "GlobalStats", "InstanceIndex"
         RESTART IDENTITY CASCADE`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

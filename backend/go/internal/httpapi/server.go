@@ -22,6 +22,7 @@ import (
 	"waifuapi/internal/cdncache"
 	"waifuapi/internal/config"
 	"waifuapi/internal/discord"
+	"waifuapi/internal/instances"
 	"waifuapi/internal/repo"
 	"waifuapi/internal/storage"
 	"waifuapi/internal/store"
@@ -42,11 +43,18 @@ type Server struct {
 	discord *discord.Client
 	tokens  *auth.TokenIssuer
 	purger  *cdncache.Purger
+	prober  instances.Prober
 }
 
 // NewServer builds a Server.
+//
+// prober is the outbound HTTP client used to check registered instances. It is a
+// dependency like any other rather than a package-level function, because it is
+// the one that makes network requests and the integration suite has to be able
+// to replace it with one that never leaves the process.
 func NewServer(cfg *config.Config, db *store.DB, data *repo.Repo, log Logger, files storage.Store,
-	discordClient *discord.Client, tokens *auth.TokenIssuer, purger *cdncache.Purger) *Server {
+	discordClient *discord.Client, tokens *auth.TokenIssuer, purger *cdncache.Purger,
+	prober instances.Prober) *Server {
 	return &Server{
 		cfg:     cfg,
 		db:      db,
@@ -57,6 +65,7 @@ func NewServer(cfg *config.Config, db *store.DB, data *repo.Repo, log Logger, fi
 		discord: discordClient,
 		tokens:  tokens,
 		purger:  purger,
+		prober:  prober,
 	}
 }
 
@@ -117,6 +126,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	s.registerCatalogRoutes(mux)
 	s.registerBannerRoutes(mux)
 	s.registerStatsRoutes(mux)
+	s.registerInstanceRoutes(mux)
 }
 
 // handleHealthz reports liveness plus the runtime numbers an operator wants

@@ -76,6 +76,64 @@ The "Build and smoke-test image" job asserts the stamps reached the binary. That
 job runs with `defaults.run.working-directory: backend/go`, so its build context
 is `.`, not `backend/go`.
 
+## The instance index
+
+`GET /instances` lists other people's deployments and whether each one is
+serving its own images. The design and its reasoning are in
+`plans/instance-index.md`; these are the rules a change has to respect.
+
+**The list lives in one JSONB row, and read-modify-write needs the lock.**
+`repo.UpdateInstances` wraps the read in a transaction holding `FOR UPDATE` on
+that row. Drop it and concurrent registrations silently overwrite each other —
+verified by removing it: 3 of 8 concurrent writes were lost. The public surface
+has no way to notice.
+
+**A registered URL is untrusted input.** The prober dials it. The address block
+list lives in `DialContext`, not in handler validation, because a hostname can
+resolve differently between validation and use. Every redirect hop is re-checked
+too. Response size, timeout and redirect count are all capped.
+
+**Signals are published as components. There is no composite score.** A single
+number hides its own weights and the person it is about is the one who would have
+to trust it. Image count is excluded on purpose: partial instances are welcome and
+counting images penalises exactly what the feature is trying to encourage.
+
+**A failed check never deletes an entry.** A Render free-tier instance sleeps for
+hours; a list that empties overnight teaches readers to distrust it.
+
+**Genealogical fields are absent unless the commit resolved.** `upstream` and
+`commitAgeDays` are populated only when the reported commit is in the bundled
+history. Absent means "we could not tell", which is different from "behind" — a
+fork has no shared ancestry to measure against.
+
+**Regenerate the commit bundle after merging**: `cd backend/go && go run
+./tools/commits`. The bundle is a snapshot, so an instance running this
+repository's newest code reads as "could not tell" until it is refreshed.
+
+**`schema.sql` no longer matches production exactly, on purpose.**
+`schema_contract_test.go` fails on any table the EF snapshot does not declare, so
+`InstanceIndex` is listed there with its reason — the same convention as
+`knownExtras` for routes. **Apply the table to production before deploying code
+that reads it:**
+
+```sql
+CREATE TABLE IF NOT EXISTS "InstanceIndex" (
+    "Id"        integer     NOT NULL PRIMARY KEY,
+    "Instances" jsonb       NOT NULL,
+    "UpdatedAt" timestamptz NOT NULL,
+    CONSTRAINT "CK_InstanceIndex_Singleton" CHECK ("Id" = 1)
+);
+```
+
+No seed row: reads treat a missing row as an empty index, so applying the table
+is the only step.
+
+**A local instance cannot successfully register anything.** The block list refuses
+loopback and RFC1918, which is every address reachable on a workstation, so the
+happy path is covered by the integration suite with a fake prober and the real
+prober is covered by `internal/instances` tests. A green local run proves the
+refusals, not the success.
+
 ### Never point a local instance at the production database
 
 `background.runJob` runs each cleanup job **once at startup**, before its daily

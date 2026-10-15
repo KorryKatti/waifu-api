@@ -3,6 +3,8 @@ package httpapi
 import (
 	"net/http"
 	"strings"
+
+	"waifuapi/internal/instances"
 )
 
 // # GET /version
@@ -22,7 +24,7 @@ import (
 // It is deliberately not the repository name: the protocol is "this software",
 // and a fork or a reimplementation answers it too. Naming the software rather
 // than the instance is what makes the check compatible rather than proprietary.
-const softwareName = "waifu-im"
+const softwareName = instances.SoftwareName
 
 // Build identity, stamped at link time.
 //

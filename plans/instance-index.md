@@ -9,14 +9,23 @@ see [Superseded](#superseded-decisions).
 
 ## Status
 
-Step 1 landed 2026-10-15: `GET /version` and working build injection. Step 2
-(`GET /instances`) is next.
+All five build steps landed 2026-10-15, on one branch. Nothing is deployed: the
+table has to be applied to production first, and Render's build args are still
+unverified.
+
+```
+1. /version + working build injection                          done
+2. GET /instances, public, from the JSONB row                   done
+3. /register — admin POST, probed before storing                done
+4. The 24h prober and the signals it writes                     done
+5. The frontend page                                            done
+```
 
 Two pieces, split because they are worth different amounts:
 
 - **`GET /version`** — a handshake any instance can answer. Useful on its own,
   and worth doing regardless of whether the index gets built. **Done.**
-- **The index** — list, registration, checker, page. **Not started.**
+- **The index** — list, registration, checker, page. **Done.**
 
 ### What step 1 changed against the plan
 
@@ -35,6 +44,41 @@ Two pieces, split because they are worth different amounts:
 - **Render is still unverified.** Nothing in the repository records what it
   injects. Until it does, expect `commit` to be `unknown` in production and a
   startup warning saying so — that is the intended reading, not a fault.
+- **A table was added, which this document's storage section did not account
+  for.** `schema.sql` records the database as frozen. `InstanceIndex` is a new
+  table rather than a change to an existing one, so EF Core cannot be affected —
+  it reads the tables its model declares. `schema_contract_test.go` fails on any
+  table the EF snapshot does not declare, so the table is listed there with its
+  reason, exactly as `knownExtras` lists a route Go serves that C# does not.
+  **The DDL has to be applied to production before the deploy.** The statement
+  is in AGENTS.md.
+- **Four things this document did not specify**, each recorded here because the
+  reasoning is the point:
+  - `DELETE /instances?url=`. Registration was otherwise one-way, and a URL
+    registered in error stays on a public list reporting itself as healthy until
+    somebody edits a JSON document by hand.
+  - `tools/commits`, which writes the reachable commits into a file the binary
+    embeds. Resolving provenance needs this repository's history and the running
+    service cannot read it: the build context has no `.git`. The bundle is a
+    snapshot, so it is regenerated after merging.
+  - `builtAt` is reported as `null` when it cannot be parsed, rather than as
+    zero. An instance whose build time is unknown has not been built today.
+  - The public list carries `version` and `lastCheckedAt`. The signals go stale —
+    the prober is daily — and a stale list that did not say so would be worse
+    than no list.
+- **A local run cannot demonstrate a successful registration.** Every address
+  reachable on a workstation is refused by the prober's block list, which is the
+  intended behaviour and is covered end to end by the integration suite with a
+  fake prober. What a local run does prove is every refusal.
+
+### Before this ships
+
+1. Apply `CREATE TABLE IF NOT EXISTS "InstanceIndex" (...)` to production — the
+   statement is in AGENTS.md, and `/instances` reads the row on every request.
+2. Establish what Render injects, and pass `VERSION` and `COMMIT` if it can.
+3. Give the bot an admin token (`WAIFU_ADMIN_TOKEN`) and the role id
+   (`INSTANCE_OPERATOR_ROLE`). Without them `/register` says so and does
+   nothing.
 
 ## Scope
 

@@ -29,6 +29,7 @@ import (
 	"waifuapi/internal/config"
 	"waifuapi/internal/discord"
 	"waifuapi/internal/httpapi"
+	"waifuapi/internal/instances"
 	"waifuapi/internal/logging"
 	"waifuapi/internal/repo"
 	"waifuapi/internal/storage"
@@ -169,7 +170,12 @@ func run() error {
 		log.Info("cloudflare cache purge enabled", "zone", cfg.Cloudflare.ZoneID)
 	}
 
-	server := httpapi.NewServer(cfg, db, data, log, files, discordClient, tokens, purger)
+	// Built once and shared: the registration endpoint and the daily job must
+	// probe identically, and a second client would double the connection pool
+	// for no reason.
+	prober := instances.NewHTTPProber()
+
+	server := httpapi.NewServer(cfg, db, data, log, files, discordClient, tokens, purger, prober)
 
 	mux := http.NewServeMux()
 	server.Register(mux)
@@ -188,6 +194,12 @@ func run() error {
 	} else {
 		log.Info("review task pruning disabled", "retentionDays", cfg.Review.TaskRetentionDays)
 	}
+
+	// The instance index is checked on the same daily ticker as the cleanup jobs,
+	// and runs at startup like they do. That startup pass reads the index and
+	// writes back signals; it makes no outbound request for an instance that is
+	// no longer in it, and it deletes nothing.
+	jobs = append(jobs, background.InstanceProbe(data, prober, backgroundLogger{log}))
 
 	background.Start(context.Background(), backgroundLogger{log}, jobs...)
 

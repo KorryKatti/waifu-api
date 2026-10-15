@@ -49,6 +49,35 @@ Use the API host whenever your bot carries any credential.
 
 Flags can be combined: `!waifu nsfw gif portrait maid`.
 
+### `/register`
+
+A slash command rather than a prefix command, because it registers an instance
+on the public index and is not something to trigger in a public channel:
+
+```
+/register url:https://waifu.example name:My Instance
+```
+
+The backend probes the instance before storing it - handshake, catalogue shape,
+and one image fetched over its own URL - and refuses it if any of those fail, so
+the index cannot fill up with links that 404. An instance with an empty catalogue
+is listed but its image signal stays unsatisfied, because "correct and empty" and
+"correct and serving" are different claims.
+
+The reply is ephemeral and deferred: the probe is three requests to someone
+else's server, which is longer than Discord's acknowledgement window.
+
+Running it twice is safe and does not overwrite the entry. That matters more than
+it sounds: an overwrite would reset the check history, which reports a fresh
+week of perfect uptime for an instance that has actually been failing.
+
+The bot sends its own admin credentials and the caller's numeric Discord id. It
+never sends a username - usernames still resolve to a different account after a
+rename, so keying an entry or a role on one hands both to whoever took the name.
+
+Set `WAIFU_ADMIN_TOKEN` and `INSTANCE_OPERATOR_ROLE` to enable it; see
+[Config](#config).
+
 ## The status line
 
 The bot rotates a presence line every 8–13 minutes. Some are jokes; the rest

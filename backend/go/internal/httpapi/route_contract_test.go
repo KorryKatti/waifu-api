@@ -95,8 +95,12 @@ func TestEveryServedRouteIsDeclared(t *testing.T) {
 	// Routes the Go service registers beyond the C# surface. Anything listed
 	// here needs a reason to exist, recorded next to it.
 	knownExtras := map[string]string{
-		"GET /healthz": "operational liveness probe, deliberately not part of the public API",
-		"GET /version": "instance handshake: lets an operator or a checker recognise a deployment as running this software, with no database and no credentials",
+		"GET /healthz":         "operational liveness probe, deliberately not part of the public API",
+		"GET /version":         "instance handshake: lets an operator or a checker recognise a deployment as running this software, with no database and no credentials",
+		"GET /instances":       "public index of other people's deployments, so somebody choosing where to point a client can see who is running one and whether it works",
+		"GET /instances/admin": "the same list plus the owner of each entry, for the operator; split from the public route so the public response type has no owner field in it at all",
+		"POST /instances":      "admin-gated registration, used by the bot's /register command; probes the instance before storing it",
+		"DELETE /instances":    "admin-gated removal, so a URL registered in error does not stay on a public list reporting itself as healthy",
 	}
 
 	// Every extra must actually be served, and must carry a recorded reason, so

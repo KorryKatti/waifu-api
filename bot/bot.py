@@ -6,6 +6,7 @@ import random
 import time
 import urllib.parse
 import discord
+from discord import app_commands
 from discord.ext import commands
 import aiohttp
 from dotenv import load_dotenv
@@ -42,7 +43,28 @@ PREFIX = os.getenv("PREFIX", "!")
 # timeout expiring mid-wake scores a healthy API as an error.
 DEFAULT_TIMEOUT_SECONDS = 30
 PROBE_TIMEOUT_SECONDS = 90
+
+# Registration is slower than an ordinary read: the backend probes the instance
+# before storing it, which is three requests to someone else's server. The
+# interaction has already been deferred by this point, so a long wait is only
+# visible as a slow reply rather than as a failed command.
+REGISTER_TIMEOUT_SECONDS = 60
 NSFW_CHANNELS = {int(c) for c in os.getenv("NSFW_CHANNELS", "").split(",") if c.strip().lstrip("-").isdigit()}
+
+# Registration credentials for /register.
+#
+# Every other command here is anonymous, because every other endpoint is. This
+# one is not: registering an instance is admin-gated, because the backend makes
+# an outbound HTTP request to whatever URL it is given. So the token belongs to
+# an admin account, and the bot is the only writer of the index.
+#
+# Point it at the API host rather than the Worker: the Worker forwards
+# Authorization but the endpoint has to reach the origin to store anything.
+ADMIN_TOKEN = os.getenv("WAIFU_ADMIN_TOKEN", "").strip()
+
+# The role granted to somebody whose instance is on the index. Empty means no
+# grant, and the command says so rather than appearing to have worked.
+OPERATOR_ROLE_ID = os.getenv("INSTANCE_OPERATOR_ROLE", "").strip()
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("waifu")
@@ -57,7 +79,17 @@ ORIENTATIONS = {"landscape", "portrait", "square"}
 
 
 class WaifuApiError(Exception):
-    """The API answered, but with an error status. `status` is the HTTP code."""
+    """The API answered, but with an error status.
+
+    `status` is the HTTP code and `detail` is the problem+json detail, which is
+    the part worth showing a person: for a failed registration it names which of
+    the instance's checks did not answer.
+    """
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+        self.detail = message
 
     def __init__(self, message, status=None):
         super().__init__(message)
@@ -116,6 +148,16 @@ class WaifuHelp(commands.HelpCommand):
 
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=WaifuHelp())
+
+# Slash commands hang off bot.tree, which commands.Bot has created since
+# discord.py 2.0. Assigning a fresh CommandTree here raises ClientException -
+# "this client already has an associated command tree" - so it is used as-is.
+#
+# /register is a slash command rather than a prefix command because it is an
+# operator action rather than something anybody should be able to trigger in a
+# public channel with a prefix, and because Discord's interaction carries the
+# caller's identity: that is how the registration records who the instance
+# belongs to without asking anybody to type their own user id.
 
 # When the process started, for the uptime line.
 STARTED_AT = time.monotonic()
@@ -212,6 +254,49 @@ async def api_get(path, *, base=None, timeout=None, **params):
             await sess.close()
         elif sess.closed:
             session = None
+
+
+async def api_post_instances(url, *, name=None, discord_user_id=""):
+    """Register an instance through POST /instances.
+
+    Discord's numeric account id is sent rather than a username. Usernames are
+    mid-migration to globally-unique and still resolve to a different account
+    after a rename, so keying the entry or the operator role on one would hand
+    both to whoever took the name.
+    """
+    global session
+    sess = session
+    if sess is None or sess.closed:
+        sess = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT_SECONDS))
+
+    payload = {"url": url, "name": name or "", "discordUserId": discord_user_id}
+    endpoint = f"{(ORIGIN_BASE or API_BASE)}/instances"
+
+    try:
+        async with sess.post(
+            endpoint,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=REGISTER_TIMEOUT_SECONDS),
+            headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+        ) as resp:
+            body = await resp.json(content_type=None) if resp.content_type == "application/json" else {}
+            if resp.status >= 400:
+                note_error()
+                # The problem+json detail is the whole value of this call: it says
+                # which of the instance's checks failed, and "the API returned an
+                # error" would leave the operator guessing.
+                detail = body.get("detail") if isinstance(body, dict) else None
+                raise WaifuApiError(detail or "The API rejected the registration.", status=resp.status)
+            note_ok(0)
+            return body
+    except WaifuApiError:
+        raise
+    except Exception:
+        note_error()
+        raise
+    finally:
+        if sess is not session and not sess.closed:
+            await sess.close()
 
 
 async def fetch_images(**params):
@@ -441,11 +526,101 @@ async def on_command_error(ctx, error):
               exc_info=(type(error), error, error.__traceback__))
 
 
+@bot.tree.command(
+    name="register",
+    description="List your own waifu API instance on the public index.",
+)
+@app_commands.describe(
+    url="The base URL of your instance, for example https://waifu.example",
+    name="A display name for the entry (optional)",
+)
+async def register_instance(
+    interaction: discord.Interaction,
+    url: str,
+    name: str | None = None,
+):
+    """Register an instance.
+
+    The backend probes it before storing anything: an instance that cannot
+    answer its own handshake, return a readable catalogue, or serve an image is
+    refused rather than listed as working.
+
+    The probe makes three outbound requests, which exceeds Discord's three-second
+    acknowledgement window, so the reply is deferred first and sent ephemerally -
+    the result is about the caller's own instance and there is no reason for
+    anyone else to see it.
+    """
+    if not ADMIN_TOKEN:
+        await interaction.response.send_message(
+            "This bot is not configured to register instances. Set WAIFU_ADMIN_TOKEN "
+            "on it and try again.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        stored = await api_post_instances(
+            url, name=name, discord_user_id=str(interaction.user.id)
+        )
+    except WaifuApiError as e:
+        detail = e.detail or "The API rejected the registration."
+        if e.status == 403:
+            detail = "This bot is not allowed to register instances."
+        elif e.status == 422:
+            detail = f"Your instance did not answer correctly.\n{detail}"
+        await interaction.followup.send(detail, ephemeral=True)
+        return
+    except Exception:
+        log.exception("register failed")
+        await interaction.followup.send(
+            "Could not reach the API. Nothing was changed.", ephemeral=True
+        )
+        return
+
+    message = (
+        f"Registered **{stored.get('name') or stored.get('url')}**.\n"
+        f"{stored.get('url')} is now on the public list."
+    )
+    if OPERATOR_ROLE_ID:
+        member = interaction.user
+        if member.guild is None:
+            message += "\n\nYou used this in DMs, so the operator role was not granted."
+        else:
+            role = member.guild.get_role(int(OPERATOR_ROLE_ID))
+            if role is None:
+                message += "\n\nThe configured operator role no longer exists."
+            elif role in member.roles:
+                message += "\n\nYou already have the operator role."
+            else:
+                try:
+                    await member.add_roles(role)
+                    message += "\n\nYou have been given the operator role."
+                except discord.Forbidden:
+                    message += (
+                        "\n\nI could not grant the operator role: I need the Manage Roles "
+                        "permission and my highest role has to be above it."
+                    )
+
+    await interaction.followup.send(message, ephemeral=True)
+
+
 @bot.event
 async def on_ready():
     global session
     session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
     log.info("logged in as %s", bot.user)
+
+    # Slash commands are registered globally rather than per guild, so the
+    # command appears immediately everywhere instead of after Discord's
+    # per-guild propagation.
+    try:
+        synced = await bot.tree.sync()
+        log.info("synced %d slash commands", len(synced))
+    except Exception:
+        log.exception("slash command sync failed")
+
     bot.loop.create_task(update_status())
     bot.loop.create_task(probe_api())
 
