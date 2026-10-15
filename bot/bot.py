@@ -79,6 +79,31 @@ NSFW_CHANNELS = {int(c) for c in os.getenv("NSFW_CHANNELS", "").split(",") if c.
 # anonymous.
 ADMIN_API_KEY = os.getenv("WAIFU_ADMIN_API_KEY", "").strip()
 
+# Where /register posts, which is never the CDN.
+#
+# The Worker drops X-Api-Key: buildUpstreamHeaders forwards only Authorization,
+# Accept and Accept-Language. A registration sent through it therefore arrives
+# anonymous and the API answers 401, and the caller is told only that "the API
+# rejected the registration" - a failure that points at nothing.
+#
+# That is not hypothetical. WAIFU_ORIGIN is unset in a default .env, and both
+# API_BASE and ORIGIN_BASE then resolve to the Worker, so the first real
+# /register silently posted a credential into a proxy that discards it.
+#
+# Set WAIFU_ORIGIN to the API host - the Render origin, not the CDN.
+REGISTER_TARGET = ORIGIN_BASE
+
+
+def register_target_is_cdn(target: str) -> bool:
+    """Whether this target would discard the credential we authenticate with.
+
+    Checked by host rather than by comparing against API_BASE, because the CDN
+    and the origin can both be configured and the one that matters is whichever
+    this is.
+    """
+    host = urllib.parse.urlparse(target).hostname or ""
+    return host.endswith("workers.dev") or host == "workers.dev"
+
 
 def redact(text: str) -> str:
     """Strip the admin key from any string on its way to a log or a message.
@@ -439,7 +464,15 @@ async def api_post_instances(url, *, name=None, discord_user_id=""):
         sess = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT_SECONDS))
 
     payload = {"url": url, "name": name or "", "discordUserId": discord_user_id}
-    endpoint = f"{(ORIGIN_BASE or API_BASE)}/instances"
+    if register_target_is_cdn(REGISTER_TARGET):
+        raise WaifuApiError(
+            "The bot is configured to send registrations to the CDN, which drops "
+            "the API key, so they would be rejected. Set WAIFU_ORIGIN to the API "
+            "host in .env - the Render origin, not the CDN.",
+            status=0,
+        )
+
+    endpoint = f"{REGISTER_TARGET}/instances"
 
     try:
         async with sess.post(
@@ -827,6 +860,17 @@ async def on_ready():
     global session
     session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
     log.info("logged in as %s", bot.user)
+
+    # Said at startup rather than on first use: the failure mode is a 401 with a
+    # message about the API rejecting the registration, which sends whoever is
+    # trying it looking in entirely the wrong place.
+    if ADMIN_API_KEY and register_target_is_cdn(REGISTER_TARGET):
+        log.warning(
+            "/register is configured but would post to the CDN (%s), which drops "
+            "X-Api-Key. Set WAIFU_ORIGIN to the API host in .env or every "
+            "registration will be rejected.",
+            REGISTER_TARGET,
+        )
 
     # Slash commands are registered globally rather than per guild, so the
     # command appears immediately everywhere instead of after Discord's
