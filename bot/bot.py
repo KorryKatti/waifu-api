@@ -79,6 +79,39 @@ NSFW_CHANNELS = {int(c) for c in os.getenv("NSFW_CHANNELS", "").split(",") if c.
 # anonymous.
 ADMIN_API_KEY = os.getenv("WAIFU_ADMIN_API_KEY", "").strip()
 
+# Who may drive the authenticated API-testing commands.
+#
+# The bot holds an admin key, so anything that can reach these commands can
+# delete images, ban accounts and approve review tasks. That is fine for the
+# operator and not fine for a server with other people in it, so access is an
+# explicit allowlist of Discord account ids rather than a permission or a role.
+#
+# Empty means every one of these commands refuses and says why. It does not mean
+# open: defaulting to permissive would mean a bot deployed without reading this
+# comment is one delete away from an incident.
+API_DEBUG_USERS = {
+    int(u)
+    for u in os.getenv("WAIFU_DEBUG_USERS", "").split(",")
+    if u.strip().lstrip("-").isdigit()
+}
+
+# The key the testing commands authenticate with.
+#
+# Defaults to the admin key so a working /register setup needs no extra
+# configuration, but it can be pointed at a lesser account. Worth doing: the
+# testing commands exist to poke at read paths, and an admin key is not needed
+# for that.
+API_TEST_KEY = os.getenv("WAIFU_API_TEST_KEY", "").strip() or ADMIN_API_KEY
+
+# Longest API response rendered into a Discord message.
+#
+# Discord rejects a message over 2000 characters outright, and an embed field
+# over 1024, so an unpaginated listing endpoint produces a response the bot
+# cannot send. Truncating keeps `!api GET /images` useful for inspection instead
+# of turning every large response into a 400 from Discord that looks like the
+# API failed.
+MAX_RESPONSE_CHARS = 1700
+
 # Where /register posts, which is never the CDN.
 #
 # The Worker drops X-Api-Key: buildUpstreamHeaders forwards only Authorization,
@@ -106,21 +139,27 @@ def register_target_is_cdn(target: str) -> bool:
 
 
 def redact(text: str) -> str:
-    """Strip the admin key from any string on its way to a log or a message.
+    """Strip every configured credential from any string on to a log or a message.
 
-    No code path here puts the key into a third-party string: the request log
-    line carries method, path, status and duration and never headers, and the key
-    is sent as a request header. So today this is defence in depth rather than a
-    fix for an observed leak.
+    Both the admin key and the separate testing key are scrubbed, not just the
+    first. WAIFU_API_TEST_KEY falls back to WAIFU_ADMIN_API_KEY when unset but is
+    not required to, and a scrubber that only knew about the admin key would let
+    the other one through into a log line in exactly the configuration where
+    somebody deliberately made them different.
+
+    No code path here puts a key into a third-party string: request headers are
+    never logged and the key is sent as a header. So today this is defence in
+    depth rather than a fix for an observed leak.
 
     It stays because the cost of being wrong is a permanent, non-expiring write
-    credential in somebody's log file, and because an HTTP library putting request
-    headers into an exception message is exactly the kind of thing that changes
-    without warning in a patch release. Scrubbing at the boundary means that
-    possibility costs nothing.
+    credential in somebody's log file, and because an HTTP library putting
+    request headers into an exception message is exactly the kind of thing that
+    changes without warning in a patch release. Scrubbing at the boundary means
+    that possibility costs nothing.
     """
-    if ADMIN_API_KEY and ADMIN_API_KEY in text:
-        return text.replace(ADMIN_API_KEY, "[redacted]")
+    for secret in {ADMIN_API_KEY, API_TEST_KEY}:
+        if secret and secret in text:
+            text = text.replace(secret, "[redacted]")
     return text
 
 # The role granted to somebody whose instance is on the index. Empty means no
@@ -505,6 +544,126 @@ async def fetch_images(**params):
     return await api_get("images", **params)
 
 
+async def api_request(method, path, *, params=None, body=None, auth=False, base=None, timeout=None):
+    """Call any endpoint and return (status, decoded_body, content_type).
+
+    api_get exists for the anonymous read path and raises on 4xx/5xx, which is
+    the right behaviour for a command that either renders a result or explains
+    a failure. This one does neither, because the point of the testing commands
+    is to *see* what came back, including the 401 and the problem+json body that
+    says why. Raising would throw away exactly the information they exist for.
+
+    auth=True sends X-Api-Key, which only the API host forwards. The Worker drops
+    it (worker.js buildUpstreamHeaders keeps Authorization, Accept and
+    Accept-Language and nothing else), so an authenticated call routed there
+    arrives anonymous and every result reads 401. Rather than let that look like
+    an API fault, it is refused with the reason.
+    """
+    global session
+    sess = session
+    if sess is None or sess.closed:
+        sess = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT_SECONDS))
+
+    target = (base or ORIGIN_BASE).rstrip("/")
+
+    if auth and register_target_is_cdn(target):
+        raise WaifuApiError(
+            "Refusing to send credentials to a CDN host: it drops X-Api-Key, so "
+            "the call would arrive anonymous and read as a 401. Set "
+            "WAIFU_ORIGIN to the API host.",
+            status=0,
+        )
+
+    headers = {"X-Api-Key": API_TEST_KEY} if auth and API_TEST_KEY else {}
+    url = f"{target}/{path.lstrip('/')}"
+    if params:
+        query = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "", [])})
+        if query:
+            url = f"{url}?{query}"
+
+    kwargs = {"headers": headers}
+    if body is not None:
+        kwargs["json"] = body
+
+    started = time.monotonic()
+    try:
+        async with sess.request(
+            method.upper(), url,
+            timeout=aiohttp.ClientTimeout(total=timeout or DEFAULT_TIMEOUT_SECONDS),
+            **kwargs,
+        ) as resp:
+            ctype = resp.content_type
+            # Every error from this API is application/problem+json, not
+            # application/json, so matching on the exact type would hand back a
+            # raw string for precisely the responses worth reading. The suffix
+            # check is what makes the problem+json detail — which says *why*
+            # something was refused — available to the caller.
+            if ctype.endswith("json"):
+                payload = await resp.json(content_type=None)
+            else:
+                payload = await resp.text()
+            if resp.status >= 400:
+                note_error()
+            else:
+                note_ok((time.monotonic() - started) * 1000)
+            return resp.status, payload, ctype
+    finally:
+        if sess is not session and not sess.closed:
+            await sess.close()
+
+
+def format_response(status, payload, ctype):
+    """Render an API response into something Discord will accept.
+
+    Keyed off the payload's type rather than the content type: by the time this
+    is called the body is already decoded, and a problem+json error arrives as a
+    dict under a content type that is not application/json. Pretty-printing by
+    content type would render every error as a Python repr.
+    """
+    if isinstance(payload, (dict, list)):
+        try:
+            rendered = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            rendered = repr(payload)
+    else:
+        rendered = str(payload)
+
+    rendered = redact(rendered)
+    if len(rendered) > MAX_RESPONSE_CHARS:
+        # Keep the tail, not the head: the interesting part of a large listing is
+        # its shape and its last entries, and a response that opens with 1700
+        # characters of the first page tells you nothing about the rest.
+        rendered = (
+            f"...truncated, {len(rendered)} chars total, showing the end...\n"
+            f"{rendered[-MAX_RESPONSE_CHARS:]}"
+        )
+    return rendered
+
+
+def debug_allowed(user):
+    """Whether this caller may run the API-testing commands, and why not if not.
+
+    Takes the user rather than a context so the slash commands, which receive
+    an Interaction and have no `.author`, can use the same gate as anything
+    else. Both expose `.id`.
+    """
+    if not API_DEBUG_USERS:
+        return (
+            False,
+            "These commands are disabled: `WAIFU_DEBUG_USERS` is empty in the bot's "
+            ".env. Set it to your Discord account id to enable them.",
+        )
+    if user.id not in API_DEBUG_USERS:
+        return False, "You're not in `WAIFU_DEBUG_USERS`."
+    if not API_TEST_KEY:
+        return (
+            False,
+            "No credential is configured. Set `WAIFU_API_TEST_KEY` (or "
+            "`WAIFU_ADMIN_API_KEY`) to an API key.",
+        )
+    return True, ""
+
+
 def build_embed(img):
     artist = next((a.get("name") for a in img.get("artists") or []), None)
     tags = [t.get("name") for t in img.get("tags") or []]
@@ -685,6 +844,428 @@ async def stats_cmd(ctx):
 @bot.event
 async def on_disconnect():
     pass
+
+
+# ---------------------------------------------------------------------------
+# Slash commands
+#
+# These are application commands rather than prefix commands for two reasons.
+#
+# Discord grants an interaction three seconds before it must answer, and an API
+# call on a cold Render instance routinely takes longer. Deferring up front
+# turns a guaranteed "This interaction failed" into a slow reply. A prefix
+# command has no such deadline, which is why the older ones here are still
+# prefix commands.
+#
+# The second reason is discoverability: a slash command is listed with its own
+# description, so this set documents itself in the Discord UI where a user
+# actually looks.
+#
+# Every reply that could carry anybody's data is ephemeral. It has to be. A
+# shared channel keeps scrollback long after the command is gone, and an
+# account listing posted to one is still there tomorrow.
+# ---------------------------------------------------------------------------
+
+
+async def tree_reply(interaction, coro, *, private):
+    """Defer, run an API call, and answer with whatever comes back.
+
+    Centralised so every command gets the same three behaviours, each of which
+    is easy to forget in one place and impossible to test for: the deferral
+    before the first await, the ephemeral flag, and turning an exception into a
+    message the caller can read instead of Discord's generic failure notice.
+    """
+    await interaction.response.defer(ephemeral=private)
+    try:
+        await coro
+    except WaifuApiError as e:
+        if interaction.response.is_done():
+            await interaction.followup.send(redact(str(e)), ephemeral=True)
+        else:
+            await interaction.response.send_message(redact(str(e)), ephemeral=True)
+    except Exception as e:
+        log.error("slash command %s failed: %r", interaction.command.name, e,
+                  exc_info=(type(e), e, e.__traceback__))
+        message = redact(f"{type(e).__name__}: {e}")
+        if interaction.response.is_done():
+            await interaction.followup.send(message[:500], ephemeral=True)
+        else:
+            await interaction.response.send_message(message[:500], ephemeral=True)
+
+
+async def guarded_tree(interaction):
+    """Whether the caller may run a credentialed command, replying if not."""
+    allowed, reason = debug_allowed(interaction.user)
+    if not allowed:
+        await interaction.response.send_message(reason, ephemeral=True)
+    return allowed
+
+
+# --- Public catalogue browsing ---------------------------------------------
+#
+# No credential is used anywhere in this half, which is what makes it safe to
+# leave open to a whole server. Reads go via the CDN host so they answer from
+# the edge cache.
+
+
+@bot.tree.command(name="image", description="Show one image by its id.")
+@app_commands.describe(image_id="The numeric image id.")
+async def slash_image(interaction: discord.Interaction, image_id: int):
+    async def run():
+        status, body, _ = await api_request(
+            "GET", f"images/{image_id}", base=API_BASE
+        )
+        if status == 404:
+            await interaction.followup.send(f"No image with id `{image_id}`.", ephemeral=True)
+            return
+        if status >= 400:
+            await interaction.followup.send(f"The API answered HTTP {status}.", ephemeral=True)
+            return
+
+        embed = build_embed(body)
+        embed.title = f"Image {body.get('id')}"
+        embed.add_field(name="Size", value=f"{body.get('width')}x{body.get('height')}", inline=True)
+        embed.add_field(name="Format", value=str(body.get("extension")), inline=True)
+        tags = ", ".join(t.get("name", "") for t in body.get("tags") or [])
+        if tags:
+            embed.add_field(name="Tags", value=tags[:1000], inline=False)
+        await interaction.followup.send(embed=embed)
+        note_served(body)
+
+    await tree_reply(interaction, run(), private=False)
+
+
+@bot.tree.command(name="tag", description="Five images carrying a given tag.")
+@app_commands.describe(slug="Tag slug, e.g. maid.")
+async def slash_tag(interaction: discord.Interaction, slug: str):
+    async def run():
+        status, body, _ = await api_request(
+            "GET", "images", base=API_BASE,
+            params={"includedTags": slug, "pageSize": 5},
+        )
+        if status >= 400:
+            await interaction.followup.send(f"The API answered HTTP {status}.", ephemeral=True)
+            return
+        items = (body.get("items") or [])[:5]
+        if not items:
+            await interaction.followup.send(f"No images tagged `{slug}`.", ephemeral=True)
+            return
+        view = GalleryView(items, interaction.user)
+        msg = await interaction.followup.send(embed=build_embed(items[0]), view=view)
+        view.message = msg
+        note_served(items[0])
+
+    await tree_reply(interaction, run(), private=False)
+
+
+@bot.tree.command(name="artist", description="Five images by a given artist.")
+@app_commands.describe(name="Artist name.")
+async def slash_artist(interaction: discord.Interaction, name: str):
+    async def run():
+        status, body, _ = await api_request(
+            "GET", "images", base=API_BASE,
+            params={"includedArtists": name, "pageSize": 5},
+        )
+        if status >= 400:
+            await interaction.followup.send(f"The API answered HTTP {status}.", ephemeral=True)
+            return
+        items = (body.get("items") or [])[:5]
+        if not items:
+            await interaction.followup.send(f"No images by `{name}`.", ephemeral=True)
+            return
+        view = GalleryView(items, interaction.user)
+        msg = await interaction.followup.send(embed=build_embed(items[0]), view=view)
+        view.message = msg
+        note_served(items[0])
+
+    await tree_reply(interaction, run(), private=False)
+
+
+@bot.tree.command(name="artists", description="Artists in the catalogue, with image counts.")
+async def slash_artists(interaction: discord.Interaction):
+    async def run():
+        status, body, _ = await api_request(
+            "GET", "artists", base=API_BASE, params={"pageSize": 25}
+        )
+        if status >= 400:
+            await interaction.followup.send(f"The API answered HTTP {status}.", ephemeral=True)
+            return
+        items = body.get("items") or []
+        lines = "\n".join(
+            f"`{a['name']}` ({a.get('imageCount', 0)})" for a in items if a.get("imageCount")
+        )
+        await interaction.followup.send(
+            embed=discord.Embed(
+                title="Artists", description=lines or "none", color=discord.Color.magenta()
+            )
+        )
+
+    await tree_reply(interaction, run(), private=False)
+
+
+@bot.tree.command(name="version", description="Which build of the API is serving right now.")
+async def slash_version(interaction: discord.Interaction):
+    async def run():
+        status, body, _ = await api_request("GET", "version", base=ORIGIN_BASE)
+        if status >= 400:
+            await interaction.followup.send(f"The API answered HTTP {status}.", ephemeral=True)
+            return
+        embed = discord.Embed(title="Deployment", color=discord.Color.magenta())
+        for key in ("software", "version", "commit", "builtAt"):
+            if body.get(key):
+                embed.add_field(name=key, value=str(body[key]), inline=False)
+        await interaction.followup.send(embed=embed)
+
+    await tree_reply(interaction, run(), private=False)
+
+
+@bot.tree.command(name="instances", description="Other people's deployments, and whether they work.")
+async def slash_instances(interaction: discord.Interaction):
+    async def run():
+        status, body, _ = await api_request("GET", "instances", base=ORIGIN_BASE)
+        if status >= 400:
+            await interaction.followup.send(f"The API answered HTTP {status}.", ephemeral=True)
+            return
+        items = body.get("instances") or []
+        if not items:
+            await interaction.followup.send("Nobody has registered an instance yet.")
+            return
+        lines = []
+        for entry in items[:20]:
+            label = entry.get("name") or entry.get("url") or "?"
+            mark = "serving" if entry.get("servingImages") else "no images"
+            lines.append(f"[{label}]({entry.get('url')}) — {mark}")
+        await interaction.followup.send(
+            embed=discord.Embed(
+                title=f"Instances ({len(items)})",
+                description="\n".join(lines),
+                color=discord.Color.magenta(),
+            )
+        )
+
+    await tree_reply(interaction, run(), private=False)
+
+
+# --- Credentialed commands -------------------------------------------------
+#
+# These send the bot's API key, which belongs to an admin account. Two rules
+# apply to every one of them, and both exist because this bot runs in servers
+# with other people in it:
+#
+# 1. Allowlisted by Discord account id. The key can delete images, approve
+#    review tasks and ban accounts; that is not something a stranger gets.
+#
+# 2. Ephemeral replies. Even for an allowed caller, the answer is somebody's
+#    account data and must not land in a channel.
+
+
+@bot.tree.command(name="me", description="Which account the bot's API key belongs to.")
+async def slash_me(interaction: discord.Interaction):
+    if not await guarded_tree(interaction):
+        return
+
+    async def run():
+        status, body, _ = await api_request("GET", "users/me", auth=True)
+        if status >= 400:
+            await interaction.followup.send(
+                f"HTTP {status}: {format_response(status, body, 'application/json')[:300]}",
+                ephemeral=True,
+            )
+            return
+        # Field by field rather than dumping the body: the useful fields are few
+        # and anything added later should not be published by default.
+        await interaction.followup.send(
+            f"Signed in as **{body.get('name')}** "
+            f"(id `{body.get('id')}`, role `{body.get('role')}`)",
+            ephemeral=True,
+        )
+
+    await tree_reply(interaction, run(), private=True)
+
+
+@bot.tree.command(name="permissions", description="What this account is allowed to do.")
+async def slash_permissions(interaction: discord.Interaction):
+    if not await guarded_tree(interaction):
+        return
+
+    async def run():
+        status, body, _ = await api_request("GET", "users/me/permissions", auth=True)
+        await interaction.followup.send(
+            f"HTTP {status}\n{format_response(status, body, 'application/json')}",
+            ephemeral=True,
+        )
+
+    await tree_reply(interaction, run(), private=True)
+
+
+@bot.tree.command(name="albums", description="Albums belonging to the bot's account.")
+async def slash_albums(interaction: discord.Interaction):
+    if not await guarded_tree(interaction):
+        return
+
+    async def run():
+        me_status, me_body, _ = await api_request("GET", "users/me", auth=True)
+        if me_status >= 400:
+            await interaction.followup.send(f"HTTP {me_status}", ephemeral=True)
+            return
+        user_id = (me_body or {}).get("id")
+
+        status, body, _ = await api_request("GET", f"users/{user_id}/albums", auth=True)
+        if status >= 400:
+            await interaction.followup.send(f"HTTP {status}", ephemeral=True)
+            return
+        items = body.get("items") or []
+        if not items:
+            await interaction.followup.send("No albums.", ephemeral=True)
+            return
+        lines = "\n".join(
+            f"`{a.get('name')}` — {a.get('imageCount', 0)} images"
+            + (" (default)" if a.get("isDefault") else "")
+            for a in items
+        )
+        await interaction.followup.send(
+            embed=discord.Embed(title="Albums", description=lines, color=discord.Color.magenta()),
+            ephemeral=True,
+        )
+
+    await tree_reply(interaction, run(), private=True)
+
+
+@bot.tree.command(name="keys", description="API keys on the bot's account.")
+async def slash_keys(interaction: discord.Interaction):
+    if not await guarded_tree(interaction):
+        return
+
+    async def run():
+        status, body, _ = await api_request("GET", "auth/api-keys", auth=True)
+        if status >= 400:
+            await interaction.followup.send(f"HTTP {status}", ephemeral=True)
+            return
+        keys = body if isinstance(body, list) else (body or {}).get("items") or []
+        if not keys:
+            await interaction.followup.send("No API keys.", ephemeral=True)
+            return
+        # The endpoint never returns plaintext — only a hash is stored — but the
+        # fields are still chosen rather than dumped.
+        lines = "\n".join(
+            f"id `{k.get('id')}` — {k.get('description')} "
+            f"(created {str(k.get('createdAt'))[:10]}, "
+            f"last used {str(k.get('lastUsedAt') or 'never')[:10]})"
+            for k in keys
+        )
+        await interaction.followup.send(
+            embed=discord.Embed(title="API keys", description=lines, color=discord.Color.magenta()),
+            ephemeral=True,
+        )
+
+    await tree_reply(interaction, run(), private=True)
+
+
+@bot.tree.command(name="review", description="What is waiting in the review queue.")
+async def slash_review(interaction: discord.Interaction):
+    if not await guarded_tree(interaction):
+        return
+
+    async def run():
+        status, body, _ = await api_request(
+            "GET", "review/tasks", auth=True, params={"pageSize": 10}
+        )
+        if status >= 400:
+            await interaction.followup.send(f"HTTP {status}", ephemeral=True)
+            return
+        items = body.get("items") or []
+        if not items:
+            await interaction.followup.send("Review queue is empty.", ephemeral=True)
+            return
+        lines = "\n".join(
+            f"`{t.get('id')}` {t.get('targetType')} {t.get('targetId')} — {t.get('status')}"
+            for t in items[:10]
+        )
+        await interaction.followup.send(
+            embed=discord.Embed(
+                title=f"Review queue ({body.get('totalCount', len(items))})",
+                description=lines,
+                color=discord.Color.orange(),
+            ),
+            ephemeral=True,
+        )
+
+    await tree_reply(interaction, run(), private=True)
+
+
+@bot.tree.command(name="reports", description="Open reports against images.")
+async def slash_reports(interaction: discord.Interaction):
+    if not await guarded_tree(interaction):
+        return
+
+    async def run():
+        status, body, _ = await api_request("GET", "reports", auth=True, params={"pageSize": 10})
+        if status >= 400:
+            await interaction.followup.send(f"HTTP {status}", ephemeral=True)
+            return
+        items = body.get("items") or []
+        if not items:
+            await interaction.followup.send("No reports.", ephemeral=True)
+            return
+        lines = "\n".join(
+            f"`{r.get('id')}` image {r.get('imageId')} — {r.get('status')}: "
+            f"{str(r.get('description'))[:60]}"
+            for r in items[:10]
+        )
+        await interaction.followup.send(
+            embed=discord.Embed(
+                title=f"Reports ({body.get('totalCount', len(items))})",
+                description=lines,
+                color=discord.Color.orange(),
+            ),
+            ephemeral=True,
+        )
+
+    await tree_reply(interaction, run(), private=True)
+
+
+@bot.tree.command(name="adminstats", description="The operator dashboard numbers.")
+async def slash_adminstats(interaction: discord.Interaction):
+    if not await guarded_tree(interaction):
+        return
+
+    async def run():
+        status, body, _ = await api_request("GET", "stats/admin", auth=True)
+        await interaction.followup.send(
+            f"HTTP {status}\n{format_response(status, body, 'application/json')}",
+            ephemeral=True,
+        )
+
+    await tree_reply(interaction, run(), private=True)
+
+
+@bot.tree.command(name="diff", description="Rows with no matching object in storage.")
+async def slash_diff(interaction: discord.Interaction):
+    if not await guarded_tree(interaction):
+        return
+
+    async def run():
+        status, body, _ = await api_request(
+            "GET", "storage-diff", auth=True,
+            params={"mode": "MissingFromS3", "pageSize": 5},
+        )
+        if status >= 400:
+            await interaction.followup.send(
+                f"HTTP {status}: {format_response(status, body, 'application/json')[:300]}",
+                ephemeral=True,
+            )
+            return
+        items = body.get("items") or []
+        lines = "\n".join(f"image `{i.get('id')}`" for i in items[:5])
+        await interaction.followup.send(
+            f"Rows with no object in storage: **{body.get('totalCount', len(items))}**\n"
+            f"{lines or 'none'}",
+            ephemeral=True,
+        )
+
+    await tree_reply(interaction, run(), private=True)
+
+
 
 
 # Cooldowns are the expected case, not a fault.

@@ -49,6 +49,51 @@ Use the API host whenever your bot carries any credential.
 
 Flags can be combined: `!waifu nsfw gif portrait maid`.
 
+### Slash commands
+
+These are application commands, so Discord lists them with their own
+descriptions and you can find them by typing `/`. They defer before calling the
+API, which matters because an interaction has three seconds to answer and a cold
+Render instance regularly takes longer than that.
+
+Public — no credential is used, so they are open to the whole server and read
+through the edge cache:
+
+| Command | What it does |
+| --- | --- |
+| `/image id:` | One image, with its tags, size and format |
+| `/tag slug:` | Five images carrying a tag, pageable |
+| `/artist name:` | Five images by an artist, pageable |
+| `/artists` | Artists in the catalogue with image counts |
+| `/version` | Which build is serving — software, version, commit, built at |
+| `/instances` | Other people's deployments and whether they are serving images |
+
+These send the bot's API key, so they are gated on `WAIFU_DEBUG_USERS` and every
+reply is **ephemeral** — visible only to whoever ran them, never left in a
+channel:
+
+| Command | What it does |
+| --- | --- |
+| `/me` | Which account the key belongs to |
+| `/permissions` | What that account may do |
+| `/albums` | Albums on that account |
+| `/keys` | API keys on that account (never plaintext — only hashes are stored) |
+| `/review` | What is waiting in the review queue |
+| `/reports` | Open reports against images |
+| `/adminstats` | Operator dashboard numbers |
+| `/diff` | Rows with no matching object in storage |
+
+With `WAIFU_DEBUG_USERS` empty — the default — the second table refuses and
+says which variable to set. It is an allowlist rather than a permission or a
+role because the credential can delete images, approve review tasks and ban
+accounts, and either of the other two can be handed to somebody who then holds an
+admin credential by accident. See [Config](#config).
+
+There is deliberately no command that takes a raw method and path. The key can
+delete things, this bot runs in servers with other people in it, and a command
+that forwards whatever it is typed is the wrong shape for that. These commands
+cover the read surface; writes are done from the dashboard or the API directly.
+
 ### `/register`
 
 A slash command rather than a prefix command, because it registers an instance
@@ -161,6 +206,8 @@ uv run python bot.py
 | `PREFIX` | `!` | Command prefix |
 | `WAIFU_API` | the Cloudflare Worker | Use the API host instead if your bot sends credentials |
 | `NSFW_CHANNELS` | empty | Extra channel IDs allowed to get NSFW results (adds to Discord's own age-restricted channels) |
+| `WAIFU_DEBUG_USERS` | empty | Discord account ids allowed to run the credentialed slash commands. Empty disables them |
+| `WAIFU_API_TEST_KEY` | `WAIFU_ADMIN_API_KEY` | Credential those commands send. Point it at a lesser account |
 
 ### The rate limit
 
