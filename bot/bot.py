@@ -4,8 +4,10 @@ import math
 import asyncio
 import random
 import time
+import json
 import urllib.parse
 import traceback
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -100,6 +102,138 @@ def redact(text: str) -> str:
 # grant, and the command says so rather than appearing to have worked.
 OPERATOR_ROLE_ID = os.getenv("INSTANCE_OPERATOR_ROLE", "").strip()
 
+# One registration per hour, across the whole server.
+#
+# Global rather than per-person, because the thing being limited is not the
+# person: it is the backend, which probes the instance with three outbound
+# requests before storing anything, using a credential the bot holds and nobody
+# else has. Per-user limits would let a channel-full of members make the same
+# number of requests in the same minute, which is the opposite of the point.
+#
+# Cooldown length differs by outcome, which is what makes it fair rather than
+# merely safe:
+#
+#   - 400, a malformed URL or a username instead of an id. Rejected before the
+#     prober runs, so it costs the backend nothing and costs the caller nothing
+#     to retry. No cooldown.
+#   - 422, the probe failed. Three outbound requests happened, so the full
+#     cooldown applies - and the caller is told when they can try again.
+#   - 200 and 201, a registration. Exactly what this is here to limit.
+#   - 401 and 403, a misconfiguration rather than anything the caller did. Full
+#     cooldown, or everybody who tries it would hammer a broken credential.
+REGISTER_COOLDOWN_SECONDS = int(os.getenv("REGISTER_COOLDOWN_SECONDS", "3600"))
+
+# Where the command's history lives: who ran it, for what, and what came back.
+#
+# The limiter has to survive a restart, or restarting the bot becomes a way
+# around it, and a file is the smallest thing that does that without adding a
+# dependency. Gitignored, contains Discord ids, stays local.
+#
+# Writes go through a temp file and a rename. A half-written file would read back
+# as a crash on the next start, and the symptom would read as "the limiter is
+# broken" rather than "the disk was full".
+REGISTER_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "register_log.json"
+)
+
+# Older entries are dropped. This is a rate limiter's state and a short history,
+# not an audit log, and an unbounded file next to the code is a nuisance.
+REGISTER_LOG_LIMIT = 200
+
+# Serialises check, then register, then write. Holding it across the network call
+# is deliberate: without it two people running the command in the same second
+# would both read an empty cooldown, both pass, and both register.
+_register_lock = asyncio.Lock()
+
+
+def load_register_log() -> dict:
+    """Read the log, treating anything unreadable as empty.
+
+    A corrupt file must not brick the command. The worst outcome of starting
+    empty is one registration with no recorded cooldown, which is also what
+    happens the first time the command is ever used.
+    """
+    try:
+        with open(REGISTER_LOG_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {"lastCooldownAt": None, "entries": []}
+    except (OSError, ValueError) as error:
+        log.warning("register log unreadable, starting a new one: %s", error)
+        return {"lastCooldownAt": None, "entries": []}
+
+    if not isinstance(data, dict):
+        return {"lastCooldownAt": None, "entries": []}
+    data.setdefault("lastCooldownAt", None)
+    data.setdefault("entries", [])
+    return data
+
+
+def save_register_log(data: dict) -> None:
+    """Write the log atomically.
+
+    Failures are logged and swallowed: losing the history is annoying, and
+    refusing to register an instance because a file could not be written is
+    worse.
+    """
+    data["entries"] = data["entries"][-REGISTER_LOG_LIMIT:]
+
+    temporary = f"{REGISTER_LOG_PATH}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        os.replace(temporary, REGISTER_LOG_PATH)
+    except OSError as error:
+        log.warning("could not write the register log: %s", error)
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+
+
+def register_cooldown_remaining(data: dict, now: datetime) -> float:
+    """Seconds until the next registration is allowed, or zero."""
+    raw = data.get("lastCooldownAt")
+    if not raw:
+        return 0.0
+    try:
+        last = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+    return max(0.0, REGISTER_COOLDOWN_SECONDS - (now - last).total_seconds())
+
+
+def describe_wait(seconds: float) -> str:
+    """A wait long enough to be worth saying, short enough not to need a clock."""
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "less than a minute"
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+    hours, remainder = divmod(minutes, 60)
+    return f"{hours} hour{'s' if hours != 1 else ''}" + (
+        f" {remainder} min" if remainder else ""
+    )
+
+
+def record_attempt(data: dict, interaction, url, name, outcome, detail) -> None:
+    """Append one attempt to the history."""
+    data["entries"].append(
+        {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "discordId": str(interaction.user.id),
+            "username": str(interaction.user),
+            "guild": interaction.guild.name if interaction.guild else None,
+            "url": url,
+            "name": name,
+            "outcome": outcome,
+            "detail": detail,
+        }
+    )
+    log.info("register attempt: %s from %s for %s", outcome, interaction.user, redact(url))
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("waifu")
 
@@ -124,10 +258,6 @@ class WaifuApiError(Exception):
         super().__init__(message)
         self.status = status
         self.detail = message
-
-    def __init__(self, message, status=None):
-        super().__init__(message)
-        self.status = status
 
 
 def nsfw_allowed(channel):
@@ -293,6 +423,11 @@ async def api_get(path, *, base=None, timeout=None, **params):
 async def api_post_instances(url, *, name=None, discord_user_id=""):
     """Register an instance through POST /instances.
 
+    Returns (status, body). The status is the part that matters: 201 is a new
+    entry and 200 is an existing one, re-running unchanged. The endpoint does not
+    say which in the payload, and inferring it from the body would mean guessing
+    at a field that may or may not be present.
+
     Discord's numeric account id is sent rather than a username. Usernames are
     mid-migration to globally-unique and still resolve to a different account
     after a rename, so keying the entry or the operator role on one would hand
@@ -322,7 +457,7 @@ async def api_post_instances(url, *, name=None, discord_user_id=""):
                 detail = body.get("detail") if isinstance(body, dict) else None
                 raise WaifuApiError(detail or "The API rejected the registration.", status=resp.status)
             note_ok(0)
-            return body
+            return resp.status, body
     except WaifuApiError:
         raise
     except Exception:
@@ -594,30 +729,77 @@ async def register_instance(
 
     await interaction.response.defer(ephemeral=True)
 
-    try:
-        stored = await api_post_instances(
-            url, name=name, discord_user_id=str(interaction.user.id)
-        )
-    except WaifuApiError as e:
-        detail = e.detail or "The API rejected the registration."
-        if e.status == 403:
-            detail = "This bot is not allowed to register instances."
-        elif e.status == 422:
-            detail = f"Your instance did not answer correctly.\n{detail}"
-        await interaction.followup.send(redact(detail), ephemeral=True)
-        return
-    except Exception:
-        log.error("%s", redact(traceback.format_exc()))
-        await interaction.followup.send(
-            "Could not reach the API. Nothing was changed.", ephemeral=True
-        )
-        return
+    # The lock covers the cooldown check, the request and the write, so two
+    # people running this in the same second cannot both see an empty cooldown.
+    async with _register_lock:
+        now = datetime.now(timezone.utc)
+        log_data = load_register_log()
 
-    message = (
-        f"Registered **{stored.get('name') or stored.get('url')}**.\n"
-        f"{stored.get('url')} is now on the public list."
-    )
-    if OPERATOR_ROLE_ID:
+        wait = register_cooldown_remaining(log_data, now)
+        if wait > 0:
+            record_attempt(log_data, interaction, url, name, "rate_limited", None)
+            save_register_log(log_data)
+            await interaction.followup.send(
+                f"One registration an hour, across the whole server. "
+                f"Try again in {describe_wait(wait)}.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            status, stored = await api_post_instances(
+                url, name=name, discord_user_id=str(interaction.user.id)
+            )
+        except WaifuApiError as error:
+            detail = error.detail or "The API rejected the registration."
+            if error.status == 400:
+                # Rejected before anything is fetched, so there is nothing to
+                # rate limit and no reason to make the caller wait.
+                record_attempt(log_data, interaction, url, name, "invalid", detail)
+                save_register_log(log_data)
+            elif error.status == 422:
+                detail = f"Your instance did not answer correctly.\n{detail}"
+                record_attempt(log_data, interaction, url, name, "probe_failed", detail)
+                log_data["lastCooldownAt"] = now.isoformat()
+                save_register_log(log_data)
+            else:
+                if error.status == 403:
+                    detail = "This bot is not allowed to register instances."
+                record_attempt(log_data, interaction, url, name, "refused", detail)
+                log_data["lastCooldownAt"] = now.isoformat()
+                save_register_log(log_data)
+
+            await interaction.followup.send(redact(detail), ephemeral=True)
+            return
+        except Exception:
+            log.error("%s", redact(traceback.format_exc()))
+            # An unreachable API is not the caller's fault, so no cooldown: they
+            # should be able to retry the moment it comes back.
+            record_attempt(log_data, interaction, url, name, "api_unreachable", None)
+            save_register_log(log_data)
+            await interaction.followup.send(
+                "Could not reach the API. Nothing was changed - try again in a moment.",
+                ephemeral=True,
+            )
+            return
+
+        # Success, or already registered. Both start the clock: one registration
+        # an hour is what was asked for, and re-running the command is not a way
+        # to get a second one.
+        already = status == 200
+        outcome = "already_registered" if already else "registered"
+        record_attempt(log_data, interaction, url, name, outcome, None)
+        log_data["lastCooldownAt"] = now.isoformat()
+        save_register_log(log_data)
+        message = (
+            f"**{stored.get('name') or stored.get('url')}** is already on the list; "
+            "nothing was changed."
+            if already
+            else f"Registered **{stored.get('name') or stored.get('url')}**.\n"
+                 f"{stored.get('url')} is now on the public list."
+        )
+
+    if OPERATOR_ROLE_ID and not already:
         member = interaction.user
         if member.guild is None:
             message += "\n\nYou used this in DMs, so the operator role was not granted."

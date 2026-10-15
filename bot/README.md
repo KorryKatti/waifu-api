@@ -161,3 +161,24 @@ uv run python bot.py
 | `PREFIX` | `!` | Command prefix |
 | `WAIFU_API` | the Cloudflare Worker | Use the API host instead if your bot sends credentials |
 | `NSFW_CHANNELS` | empty | Extra channel IDs allowed to get NSFW results (adds to Discord's own age-restricted channels) |
+
+### The rate limit
+
+One registration per hour, **across the whole server** rather than per person.
+The thing being limited is not the caller, it is the backend: the API probes the
+instance with three outbound requests before storing anything, using a credential
+the bot holds and nobody else has.
+
+Cooldown length depends on the outcome:
+
+| Outcome | Cooldown | Why |
+| --- | --- | --- |
+| Registered, or already registered | 1 hour | That is the thing being limited |
+| `422` — the instance did not answer | 1 hour | Three outbound requests happened |
+| `401` / `403` | 1 hour | A misconfiguration, not the caller's fault; without a cooldown everybody who tries it hammers a broken credential |
+| `400` — a malformed URL or a username instead of an id | **none** | Rejected before the prober runs, so it costs nothing and a typo should not cost an hour |
+| The API was unreachable | **none** | Not the caller's fault; they should retry when it is back |
+
+The state and a short history live in `register_log.json`, next to the bot and
+gitignored — the limiter has to survive a restart, or restarting the bot becomes
+a way around it. Deleting the file resets it, which is the one hole in it.

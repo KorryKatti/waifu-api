@@ -1,6 +1,12 @@
 # Local Discord credentials. Never commit this.
 .env
 
+# The /register rate limiter's state and history. Local, and it holds Discord
+# ids, so it must not be committed. Deleting it resets the limiter to "no
+# cooldown recorded", which is the only way to get around the hour.
+register_log.json
+register_log.json.tmp
+
 # Python build and tooling artefacts.
 __pycache__/
 .ruff_cache/

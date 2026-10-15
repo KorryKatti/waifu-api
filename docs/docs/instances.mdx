@@ -86,20 +86,24 @@ It does not have to be the same host as your API.
 
 ## Getting on the index
 
-Ask in the Discord server and someone will run the command for you.
+Run the command in the Discord server with your instance URL:
+
+```
+/register url:https://waifu.example name:My Instance
+```
+
+**Anyone can run it.** The bot holds the credential, not you, so there is no role
+to be given and nothing to ask permission for. The entry is recorded against your
+own Discord account, which is how the operator role is granted.
 
 <div style={{borderLeft: '4px solid var(--ifm-color-primary)', paddingLeft: '1rem'}}>
 
 **The bot is not always online.** It runs when the operator has it running, which
-is most of the time not. So `/register` will not answer straight away. That is
-expected — ask once in the server rather than messaging anyone directly, and
-someone will run it when they are around.
+is most of the time not, so the command may not answer straight away. That is
+expected rather than broken — if nothing comes back, ask in the server rather
+than messaging anyone directly.
 
 </div>
-
-Registration is not self-service. It is admin-gated on purpose: the API makes an
-outbound request to whatever URL it is given, so the check happens server-side,
-where the address can be validated before anything is dialled.
 
 ### What registration does
 

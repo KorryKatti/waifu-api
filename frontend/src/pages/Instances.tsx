@@ -107,17 +107,20 @@ function checkAge(checkedAt: string | null): string {
 
 // RegisterHint is the only place the page tells someone how to get on it.
 //
-// It is worded the way it is because the bot is not always running. A page that
-// just said "run /register" would have somebody waiting for a command that never
-// arrives, then trying to DM somebody about it. Saying the bot is off most of the
-// time, and that the Discord is the right place to ask, sets that up front -
-// which is also why it links to the server rather than offering a contact route.
+// It says anyone can run the command, because anyone can: the bot carries the
+// credential, not the person, so there is no role to be given and nothing to ask
+// permission for. An earlier version of this said someone would run it for you,
+// which described a restriction the command does not have.
+//
+// It still says the bot is not always online, because that is the thing that
+// actually wastes people's time - somebody runs the command, nothing answers,
+// and they conclude the feature is broken.
 const RegisterHint = () => {
     const discordServerUrl = getEnv('VITE_DISCORD_SERVER_URL');
 
-    const body = (
-        <>
-            Ask in the{' '}
+    return (
+        <span>
+            Run <code>/register</code> in the{' '}
             {discordServerUrl ? (
                 <a
                     href={discordServerUrl}
@@ -130,14 +133,8 @@ const RegisterHint = () => {
             ) : (
                 'Discord server'
             )}{' '}
-            and someone will run <code>/register</code> for you.
-        </>
-    );
-
-    return (
-        <span>
-            {body} The bot is only up when the operator has it running, so it will
-            not answer straight away &mdash; no need to DM anyone or ask twice.
+            with your instance URL &mdash; anyone can. The bot is only up when the
+            operator has it running, so it may not answer straight away.
         </span>
     );
 };
