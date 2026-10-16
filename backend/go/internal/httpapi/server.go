@@ -111,6 +111,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// it. GET also answers HEAD.
 	mux.HandleFunc("GET "+base+"version", s.handleVersion)
 
+	s.registerRootRoute(mux)
 	s.registerImageRoutes(mux)
 	s.registerUploadRoutes(mux)
 	s.registerReviewRoutes(mux)

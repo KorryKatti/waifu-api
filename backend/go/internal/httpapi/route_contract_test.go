@@ -95,6 +95,7 @@ func TestEveryServedRouteIsDeclared(t *testing.T) {
 	// Routes the Go service registers beyond the C# surface. Anything listed
 	// here needs a reason to exist, recorded next to it.
 	knownExtras := map[string]string{
+		"GET /":                "index: the root was the only path answering with net/http's text/plain 404 rather than JSON, so a client asking what this is and what it serves had nothing to read",
 		"GET /healthz":         "operational liveness probe, deliberately not part of the public API",
 		"GET /version":         "instance handshake: lets an operator or a checker recognise a deployment as running this software, with no database and no credentials",
 		"GET /instances":       "public index of other people's deployments, so somebody choosing where to point a client can see who is running one and whether it works",
