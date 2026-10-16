@@ -7,6 +7,12 @@
 register_log.json
 register_log.json.tmp
 
+# The /instances needed:true limiter's state and history. Same reasons as the
+# file above: local, holds Discord ids, and deleting it is the only way around
+# the hour.
+instance_ping_log.json
+instance_ping_log.json.tmp
+
 # Python build and tooling artefacts.
 __pycache__/
 .ruff_cache/

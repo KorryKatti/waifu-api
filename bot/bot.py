@@ -25,28 +25,28 @@ load_dotenv()
 # backend. The response shape is identical either way.
 API_BASE = os.getenv("WAIFU_API", "https://waifu-cdn.waifu-api.workers.dev").rstrip("/")
 
-# The API host itself, used only by the keep-alive probe.
+# The API host itself, rather than the Worker in front of it.
 #
-# Probing API_BASE does not keep Render awake, and that is the point of this
-# variable. /ping is not on the worker's NEVER_CACHE list, so it is served from
-# the edge for JSON_TTL_SECONDS (60s) - and the probe interval is also 60s. Two
-# equal periods means whether a given probe reaches the origin is decided by
-# sub-second timing jitter: land after the entry expires and it forwards, land
-# before and the worker answers from cache and Render never sees the request at
-# all. The keep-alive works roughly half the time.
+# Used where a request has to reach Render: /register, which authenticates and
+# which the Worker would strip the credential from, and /version and /instances,
+# which want the origin's own answer rather than a cached one.
 #
-# Going straight to the host removes the cache from the path entirely, so every
-# probe lands. Falls back to API_BASE, which is correct for a bot running
-# against an uncached origin already.
+# It used to be the keep-alive probe's target too, and that was the whole reason
+# it existed - the edge caches /ping for 60s, so probing through the Worker only
+# reached Render about half the time and a 60-second probe against a 60-second
+# cache TTL is a coin flip decided by sub-second jitter. Something else keeps
+# Render awake now, so nothing here polls the origin on a timer.
 ORIGIN_BASE = os.getenv("WAIFU_ORIGIN", API_BASE).rstrip("/")
 
 PREFIX = os.getenv("PREFIX", "!")
 
-# Ordinary API calls give up after 30s. The keep-alive probe overrides this,
-# because a cold start on a free Render instance takes longer than that and a
-# timeout expiring mid-wake scores a healthy API as an error.
+# Ordinary API calls give up after 30s. Reads that may meet a sleeping origin
+# override this: a free-tier instance spins down after about fifteen idle
+# minutes, and nothing here holds it awake any more, so a cold start is the
+# normal case rather than the exception. Timing out mid-wake scores a working API
+# as an error.
 DEFAULT_TIMEOUT_SECONDS = 30
-PROBE_TIMEOUT_SECONDS = 90
+ORIGIN_TIMEOUT_SECONDS = 90
 
 # Registration is slower than an ordinary read: the backend probes the instance
 # before storing it, which is three requests to someone else's server. The
@@ -209,54 +209,85 @@ REGISTER_LOG_LIMIT = 200
 # would both read an empty cooldown, both pass, and both register.
 _register_lock = asyncio.Lock()
 
+# Where /instances needed:true records who asked and when.
+#
+# A separate file from the registration log rather than a second key in that one,
+# because the two limit different things and a corrupt file should not silently
+# disable both. Gitignored, contains Discord ids, stays local.
+INSTANCE_PING_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "instance_ping_log.json"
+)
 
-def load_register_log() -> dict:
-    """Read the log, treating anything unreadable as empty.
+# Serialises the whole of a forced measurement - cooldown check, the requests,
+# and the write.
+#
+# Not just for the file. Two people passing needed:true in the same second would
+# otherwise both pass the cooldown, both fan out to every instance at once, and
+# both write; the second write would also land a timestamp the first had already
+# superseded, which is how a limiter ends up reporting a shorter gap than the one
+# that actually happened.
+_instance_ping_lock = asyncio.Lock()
+
+
+def load_json_log(path: str, label: str, cooldown_key: str) -> dict:
+    """Read a command's log, treating anything unreadable as empty.
 
     A corrupt file must not brick the command. The worst outcome of starting
-    empty is one registration with no recorded cooldown, which is also what
-    happens the first time the command is ever used.
+    empty is one uncharged run, which is also what happens the first time the
+    command is ever used.
+
+    Shared by every command that keeps a local cooldown file, because the part
+    that matters is not the bookkeeping - it is that a half-written or truncated
+    file reads back as a fresh limiter rather than as a crash.
     """
+    empty = {cooldown_key: None, "entries": []}
     try:
-        with open(REGISTER_LOG_PATH, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
     except FileNotFoundError:
-        return {"lastCooldownAt": None, "entries": []}
+        return empty
     except (OSError, ValueError) as error:
-        log.warning("register log unreadable, starting a new one: %s", error)
-        return {"lastCooldownAt": None, "entries": []}
+        log.warning("%s log unreadable, starting a new one: %s", label, error)
+        return empty
 
     if not isinstance(data, dict):
-        return {"lastCooldownAt": None, "entries": []}
-    data.setdefault("lastCooldownAt", None)
+        return empty
+    data.setdefault(cooldown_key, None)
     data.setdefault("entries", [])
     return data
 
 
-def save_register_log(data: dict) -> None:
-    """Write the log atomically.
+def save_json_log(path: str, label: str, data: dict) -> None:
+    """Write a command's log atomically.
 
-    Failures are logged and swallowed: losing the history is annoying, and
-    refusing to register an instance because a file could not be written is
-    worse.
+    Failures are logged and swallowed. Losing the history is annoying; refusing
+    to run a command because a file could not be written is worse.
     """
     data["entries"] = data["entries"][-REGISTER_LOG_LIMIT:]
 
-    temporary = f"{REGISTER_LOG_PATH}.tmp"
+    temporary = f"{path}.tmp"
     try:
         with open(temporary, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2)
-        os.replace(temporary, REGISTER_LOG_PATH)
+        os.replace(temporary, path)
     except OSError as error:
-        log.warning("could not write the register log: %s", error)
+        log.warning("could not write the %s log: %s", label, error)
         try:
             os.unlink(temporary)
         except OSError:
             pass
 
 
-def register_cooldown_remaining(data: dict, now: datetime) -> float:
-    """Seconds until the next registration is allowed, or zero."""
+def load_register_log() -> dict:
+    return load_json_log(REGISTER_LOG_PATH, "register", "lastCooldownAt")
+
+
+def save_register_log(data: dict) -> None:
+    save_json_log(REGISTER_LOG_PATH, "register", data)
+
+
+def cooldown_remaining(data: dict, now: datetime, window: float) -> float:
+    """Seconds until the next run is allowed, or zero."""
     raw = data.get("lastCooldownAt")
     if not raw:
         return 0.0
@@ -265,7 +296,15 @@ def register_cooldown_remaining(data: dict, now: datetime) -> float:
     except (TypeError, ValueError):
         return 0.0
 
-    return max(0.0, REGISTER_COOLDOWN_SECONDS - (now - last).total_seconds())
+    return max(0.0, window - (now - last).total_seconds())
+
+
+def register_cooldown_remaining(data: dict, now: datetime) -> float:
+    return cooldown_remaining(data, now, REGISTER_COOLDOWN_SECONDS)
+
+
+def instance_ping_cooldown_remaining(data: dict, now: datetime) -> float:
+    return cooldown_remaining(data, now, INSTANCE_PING_COOLDOWN_SECONDS)
 
 
 def describe_wait(seconds: float) -> str:
@@ -297,6 +336,400 @@ def record_attempt(data: dict, interaction, url, name, outcome, detail) -> None:
         }
     )
     log.info("register attempt: %s from %s for %s", outcome, interaction.user, redact(url))
+
+
+# --- Instance latency ------------------------------------------------------
+#
+# /instances reports whether each deployment works and says nothing about how
+# fast it is, which is the question somebody actually has when deciding where to
+# point a client.
+#
+# The uptime on that list comes from the backend's prober, running on Render.
+# These measurements come from wherever this bot runs, which is usually another
+# country and a residential connection. That is the entire reason to do it here
+# rather than read a number the backend could have published: it is a second
+# vantage point, not a better one.
+#
+# It is also not the reader's latency, and the output says so. A millisecond
+# figure that does not name the line it was measured on is a confident wrong
+# answer for anyone reading it from another continent.
+
+# How often to re-measure on its own.
+#
+# Hourly, and not on a shorter interval for a reason that is not throughput: a
+# request to a listed instance is a request to somebody else's free-tier
+# deployment, and a sleeping one has to start up to answer it. A sweep every
+# fifteen minutes kept those instances marginally warm all day for a number that
+# barely moves - inter-region routing drifts over hours, not minutes. Once an hour
+# is the point where the figure would have changed anyway.
+#
+# Somebody who wants it now asks, with `needed: true`, which is limited to one
+# per hour across the server so this stays the floor rather than becoming the
+# ceiling.
+#
+# 0 switches the measurements off, and /instances then reports the index alone.
+INSTANCE_PING_SECONDS = int(os.getenv("INSTANCE_PING_SECONDS", "3600"))
+
+# Gap between forced measurements, whole server.
+#
+# Same reasoning as REGISTER_COOLDOWN_SECONDS and for the same reason: the thing
+# being limited is not the person but this bot's connection and other people's
+# servers. Per-user limits would let a channel-full of members each trigger a
+# sweep in the same minute.
+#
+# Matching the sweep interval is deliberate. A forced measurement is worth
+# exactly as much as a scheduled one, so allowing more of them than the schedule
+# already provides would make the schedule pointless.
+INSTANCE_PING_COOLDOWN_SECONDS = int(os.getenv("INSTANCE_PING_COOLDOWN_SECONDS", "3600"))
+
+# Deadline for one measurement. Short on purpose: a Render free-tier instance
+# that has spun down is not going to answer inside a cold start, so holding the
+# sweep open for one would make every sweep as slow as the worst entry on the
+# list. A timeout here reads as "no answer", which is true, and is what the
+# backend's own prober would record for the same instance.
+INSTANCE_PING_TIMEOUT_SECONDS = 3.0
+
+# How many instances one sweep will dial. The index is small in practice; the cap
+# is so that a list which grew unexpectedly could not become an unbounded fan-out
+# from the operator's connection.
+INSTANCE_PING_LIMIT = 25
+
+# Redirect hops allowed while measuring. Enough for the ordinary http -> https
+# move, and bounded because the destination is a URL on a public list rather than
+# a server this bot administers.
+INSTANCE_PING_MAX_REDIRECTS = 3
+
+# How old a measurement may be before the command says so. Two sweeps, so one
+# skipped or failed round does not immediately present every figure as stale.
+#
+# Floored at a minute because the arithmetic alone degenerates: an interval of 0
+# switches the measurements off, and 2 * 0 would mark a just-taken figure stale
+# before anybody could read it.
+INSTANCE_PING_FRESH_SECONDS = max(2 * INSTANCE_PING_SECONDS, 60)
+
+# Measured round trip per instance, keyed by the URL exactly as the index spells
+# it, because that is the key the command has to hand.
+#
+# url -> {"ms": float | None, "status": int | None, "error": str | None,
+#         "at": float}
+#
+# `at` is monotonic, like STARTED_AT and last_served_at, so the age survives a
+# wall-clock change.
+#
+# Replaced wholesale by each successful sweep rather than merged into, so a URL
+# that has left the index stops being reported. A failed sweep leaves it
+# untouched: not reaching the index is a reason to say the numbers are old, not a
+# reason to throw them away.
+INSTANCE_PINGS: dict[str, dict] = {}
+
+
+def instance_probe_url(base_url: str) -> str | None:
+    """The URL to measure, or None when this entry is not something to dial.
+
+    Scheme, host and no embedded credentials. The address block list the backend
+    enforces is deliberately not repeated here: it exists to stop the *backend*,
+    which sits in a datacentre beside a database, from being talked into dialling
+    an internal address on request. This bot dials a list only an admin can write
+    to, from the operator's own machine, where an internal address is an address
+    the operator owns.
+
+    What is still worth refusing is a URL this bot has no business fetching: a
+    non-HTTP scheme, or one carrying credentials that would otherwise reach a log
+    line and an outbound header.
+    """
+    try:
+        parsed = urllib.parse.urlparse(base_url)
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    return urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", "")
+    )
+
+
+def describe_age(seconds: float) -> str:
+    """An age short enough to read at a glance."""
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "under a minute"
+    if minutes < 60:
+        return f"{minutes} min"
+    hours = minutes // 60
+    return f"{hours} h" if hours < 48 else f"{hours // 24} d"
+
+
+def describe_ping(url: str, now: float) -> str:
+    """The latency suffix for one line of /instances.
+
+    Unmeasured, unreachable and slow are three different claims and are rendered
+    as three different things. Collapsing them is how a list comes to look
+    healthy because nobody measured it.
+    """
+    record = INSTANCE_PINGS.get(url)
+    if record is None or (record.get("ms") is None and not record.get("error")):
+        return "not measured yet"
+
+    if record.get("error"):
+        text = {
+            "timeout": f"no answer in {int(INSTANCE_PING_TIMEOUT_SECONDS)}s",
+            "sweep": "measurement failed",
+        }.get(record["error"], "no answer")
+    else:
+        text = f"{round(record['ms'])} ms"
+        status = record.get("status")
+        # A fast 404 is a fast answer to a request that should not have 404'd.
+        # On its own, rounded, it reports a broken handshake as a quick one.
+        if status and not 200 <= status < 300:
+            text += f" (HTTP {status})"
+
+    age = now - record.get("at", now)
+    if age > INSTANCE_PING_FRESH_SECONDS:
+        text += f", {describe_age(age)} old"
+    return text
+
+
+async def measure_instance(sess, url: str) -> dict:
+    """Time one GET /version against an instance.
+
+    /version because the index documents it as answering with no database and no
+    credentials, which is the only endpoint on a stranger's deployment a bot can
+    ask for. The image URL is deliberately not touched: that check belongs to the
+    backend's prober, and repeating it would spend the operator's CDN on a
+    measurement about their latency.
+
+    A response of any status is a measurement, because what is being timed is the
+    round trip to the host and a fast 404 is still a fast host. The status is
+    carried rather than dropped so a 142 ms handshake stays distinguishable from a
+    142 ms 404 once both are rounded for display.
+    """
+    started = time.monotonic()
+    # The handshake, not the root. A deployment with a base path answers
+    # /api/version rather than /version, and appending to the URL as the index
+    # spells it gets that right without this function needing to know about base
+    # paths. instance_probe_url has already stripped any trailing slash, so this
+    # cannot double up.
+    try:
+        async with sess.get(
+            f"{url}/version", max_redirects=INSTANCE_PING_MAX_REDIRECTS
+        ) as resp:
+            await resp.read()
+            return {
+                "ms": (time.monotonic() - started) * 1000,
+                "status": resp.status,
+                "error": None,
+            }
+    except (asyncio.TimeoutError, TimeoutError):
+        return {"ms": None, "status": None, "error": "timeout"}
+    except (aiohttp.ClientError, OSError) as error:
+        # Network-level failures only, and that restriction is the point. A
+        # NameError from a typo in this function must not come back as a recorded
+        # "no answer": that is a broken measurement wearing the costume of a
+        # working one, and an instance index that reports its own bugs as other
+        # people's outages is worse than one that admits it is unsure. Anything
+        # else is a bug, and reaches the sweep's gather, which logs it.
+        return {"ms": None, "status": None, "error": f"{type(error).__name__}: {error}"}
+
+
+async def fetch_index(sess) -> tuple:
+    """GET /instances, returning (status, body), recording nothing.
+
+    Deliberately not api_request. That writes into STATS["latency_ms"] on
+    success, which is the /ping round trip shown in the status line, and a sweep
+    running every fifteen minutes would spend most of its life overwriting that
+    number with the time taken to fetch an index nobody is waiting for.
+
+    The 30s here rather than the 3s the measurements get: this is our own API,
+    answering one small query, and a timeout against it should mean something
+    actually went wrong rather than being swept up by a slow instance elsewhere
+    in the same session.
+    """
+    timeout = aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT_SECONDS)
+    async with sess.get(
+        f"{ORIGIN_BASE}/instances",
+        timeout=timeout,
+        max_redirects=INSTANCE_PING_MAX_REDIRECTS,
+    ) as resp:
+        if resp.content_type.endswith("json"):
+            return resp.status, await resp.json(content_type=None)
+        return resp.status, await resp.text()
+
+
+def plan_instance_pings(entries) -> dict:
+    """Index entries -> the URLs to dial, dropping anything not worth dialling.
+
+    Keyed by the index's own spelling of the URL, because that is the key the
+    command has to hand; the value is the normalised form to actually request.
+    """
+    plan = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        raw = str(entry.get("url") or "")
+        dialable = instance_probe_url(raw)
+        if dialable:
+            plan[raw] = dialable
+    return plan
+
+
+async def measure_instance_urls(plan: dict) -> int:
+    """Measure every URL in a plan concurrently, updating the cache in place.
+
+    Returns how many were measured.
+
+    Concurrent because the sweep should cost about as long as the slowest single
+    instance rather than the sum of them. That is what keeps one sleeping entry
+    from setting the pace for everything else, and it is also what makes a forced
+    measurement viable at all: serially, twenty-five instances at three seconds
+    each is a seventy-five second wait on somebody's command.
+    """
+    if not plan:
+        INSTANCE_PINGS.clear()
+        return 0
+
+    urls = list(plan)[:INSTANCE_PING_LIMIT]
+    if len(plan) > len(urls):
+        log.info("instance sweep: measuring %d of %d entries", len(urls), len(plan))
+
+    connector = aiohttp.TCPConnector(force_close=True, limit=INSTANCE_PING_LIMIT)
+    timeout = aiohttp.ClientTimeout(total=INSTANCE_PING_TIMEOUT_SECONDS)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as sess:
+        results = await asyncio.gather(
+            *(measure_instance(sess, plan[url]) for url in urls),
+            return_exceptions=True,
+        )
+
+    at = time.monotonic()
+    measured = {}
+    for url, result in zip(urls, results):
+        if isinstance(result, asyncio.CancelledError):
+            # The bot is shutting down. Not a measurement failure and not
+            # something to record, so it goes no further than here.
+            raise result
+        if isinstance(result, BaseException):
+            # A bug in measure_instance rather than anything about the instance.
+            # Recorded under its own code so the command says "measurement
+            # failed" instead of blaming somebody else's server for it.
+            log.warning("instance ping %s raised: %r", redact(url), result)
+            result = {"ms": None, "status": None, "error": "sweep"}
+        measured[url] = {**result, "at": at}
+
+    # clear() then update() rather than rebinding the name. Still a wholesale
+    # replacement, so a URL that has left the index stops being reported - but a
+    # module-level cache that can be swapped out from under any code holding a
+    # reference to it is a stale-snapshot bug waiting for whoever writes the next
+    # thing that reads it.
+    INSTANCE_PINGS.clear()
+    INSTANCE_PINGS.update(measured)
+    for url in INSTANCE_PINGS:
+        log.info("instance ping: %s -> %s", redact(url), describe_ping(url, at))
+    return len(measured)
+
+
+async def refresh_instance_pings() -> int:
+    """The scheduled sweep: read the index, then measure everything on it.
+
+    Returns how many were measured, or zero if the index could not be read.
+
+    A failure to read the index keeps the last measurements rather than clearing
+    them. Not reaching our own API is a reason to say the figures are old, not a
+    reason to throw them away - and the command labels their age, so it can say
+    so honestly rather than showing a column of nothing.
+    """
+    connector = aiohttp.TCPConnector(force_close=True, limit=INSTANCE_PING_LIMIT)
+    timeout = aiohttp.ClientTimeout(total=INSTANCE_PING_TIMEOUT_SECONDS)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as sess:
+        try:
+            status, body = await fetch_index(sess)
+        except Exception as error:
+            log.warning(
+                "instance sweep: could not read the index, keeping the last "
+                "measurements: %s",
+                redact(str(error)),
+            )
+            return 0
+        if status >= 400 or not isinstance(body, dict):
+            log.warning(
+                "instance sweep: GET /instances = %s, keeping the last measurements",
+                status,
+            )
+            return 0
+        entries = body.get("instances") or []
+
+    if not entries:
+        log.info("instance sweep: the index is empty, nothing to measure")
+        INSTANCE_PINGS.clear()
+        return 0
+    return await measure_instance_urls(plan_instance_pings(entries))
+
+
+async def force_instance_measurement(interaction, items) -> tuple:
+    """Measure now, if the server has not already done so this hour.
+
+    Returns (refusal, note). A refusal is a message to send instead of the list
+    and the caller stops; a note is a line to put above the list it goes on to
+    render. Exactly one of the two is ever set.
+
+    This is the one place where measuring happens inside a command, which is why
+    it needs the limit: /instances is public, so an unlimited version would let
+    anybody in the server choose when this bot fans out to every listed
+    deployment. Once an hour, whole server, is the same bargain /register makes
+    for the same reason.
+
+    The command has already deferred, so the wait is visible as a slow reply
+    rather than a failed interaction. The measurements run concurrently and each
+    gives up after INSTANCE_PING_TIMEOUT_SECONDS, so the worst case is that
+    timeout plus the index read the command has already done - which is also why
+    the entries the command fetched are reused rather than fetched again.
+    """
+    async with _instance_ping_lock:
+        now = datetime.now(timezone.utc)
+        data = load_json_log(INSTANCE_PING_LOG_PATH, "instance ping", "lastCooldownAt")
+        wait = instance_ping_cooldown_remaining(data, now)
+        if wait > 0:
+            record_ping_attempt(data, interaction, "rate_limited", None)
+            save_json_log(INSTANCE_PING_LOG_PATH, "instance ping", data)
+            return (
+                f"Someone measured this {describe_wait(wait)} ago. One measurement "
+                f"an hour, across the whole server - try again then.",
+                None,
+            )
+
+        measured = await measure_instance_urls(plan_instance_pings(items))
+
+        outcome = "measured" if measured else "nothing_to_measure"
+        detail = None if measured else "no listed instance could be measured"
+        record_ping_attempt(data, interaction, outcome, detail)
+        # Recorded whether or not anything answered. The requests were made
+        # either way, so charging for them is the honest accounting, and it also
+        # stops a broken index from being retried in a loop by whoever is
+        # curious enough to keep asking.
+        data["lastCooldownAt"] = now.isoformat()
+        save_json_log(INSTANCE_PING_LOG_PATH, "instance ping", data)
+
+    unreachable = sum(1 for r in INSTANCE_PINGS.values() if r.get("error"))
+    note = f"Measured {measured} instance{'s' if measured != 1 else ''} just now."
+    if unreachable:
+        note += f" {unreachable} did not answer."
+    return None, note
+
+
+def record_ping_attempt(data: dict, interaction, outcome, detail) -> None:
+    """Append one forced measurement to the history."""
+    data["entries"].append(
+        {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "discordId": str(interaction.user.id),
+            "username": str(interaction.user),
+            "guild": interaction.guild.name if interaction.guild else None,
+            "outcome": outcome,
+            "detail": detail,
+        }
+    )
+    log.info("instance ping attempt: %s from %s", outcome, redact(str(interaction.user)))
+
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("waifu")
@@ -451,6 +884,7 @@ STARTED_AT = time.monotonic()
 # a line that has nothing to show returns None and falls back to a fixed one.
 STATS = {
     "latency_ms": None,      # last successful round trip to API_BASE
+    "latency_at": None,      # monotonic, or None if nothing has answered yet
     "images": None,          # /stats/public totalImages
     "tags": None,            # /stats/public totalTags
     "artists": None,         # /stats/public totalArtists
@@ -461,9 +895,32 @@ STATS = {
     "last_error_at": None,   # monotonic, or None if nothing has failed yet
 }
 
+# How long a latency reading is still worth showing.
+#
+# There used to be a 60-second probe whose only real job was keeping the origin
+# awake, and it refreshed this number as a side effect. That probe is gone, so
+# latency now comes from whatever real traffic the bot happens to serve, and on
+# a quiet day there may be none for hours. Without a window the status line would
+# go on reporting "the API, 340ms away" from a reading taken this morning, which
+# is the same confident-wrong-number problem the instance index refuses.
+#
+# Past this the slot returns None and the rotation falls back to a fixed line,
+# which is the honest rendering of "I have no recent measurement".
+LATENCY_FRESH_SECONDS = 15 * 60
+
+
+def fresh_latency_ms():
+    """A recent round trip in milliseconds, or None if there isn't one."""
+    if STATS["latency_ms"] is None or STATS["latency_at"] is None:
+        return None
+    if time.monotonic() - STATS["latency_at"] > LATENCY_FRESH_SECONDS:
+        return None
+    return STATS["latency_ms"]
+
 
 def note_ok(latency_ms):
     STATS["latency_ms"] = round(latency_ms)
+    STATS["latency_at"] = time.monotonic()
 
 
 def note_error():
@@ -883,7 +1340,16 @@ async def ping(ctx):
 async def stats_cmd(ctx):
     """Live numbers: API latency, catalogue size, uptime and error count."""
     embed = discord.Embed(title="Stats", color=discord.Color.magenta())
-    embed.add_field(name="API latency", value=f"{STATS['latency_ms']}ms" if STATS["latency_ms"] else "no reading yet")
+    latency = fresh_latency_ms()
+    if latency is None:
+        reading = (
+            "no reading yet"
+            if STATS["latency_at"] is None
+            else f"last reading {human_duration(time.monotonic() - STATS['latency_at'])} ago"
+        )
+    else:
+        reading = f"{latency}ms"
+    embed.add_field(name="API latency", value=reading)
     embed.add_field(name="Uptime", value=f"{human_duration(time.monotonic() - STARTED_AT)}")
     embed.add_field(name="Served here", value=f"{STATS['served']} images")
     if STATS["errors"]:
@@ -1092,8 +1558,13 @@ async def slash_version(interaction: discord.Interaction):
     await tree_reply(interaction, run(), private=False)
 
 
-@bot.tree.command(name="instances", description="Other people's deployments, and whether they work.")
-async def slash_instances(interaction: discord.Interaction):
+@bot.tree.command(
+    name="instances", description="Other people's deployments, and whether they work."
+)
+@app_commands.describe(
+    needed="Re-measure latency now. One per hour across the server.",
+)
+async def slash_instances(interaction: discord.Interaction, needed: bool = False):
     async def run():
         status, body, _ = await api_request("GET", "instances", base=ORIGIN_BASE)
         if status >= 400:
@@ -1103,18 +1574,61 @@ async def slash_instances(interaction: discord.Interaction):
         if not items:
             await interaction.followup.send("Nobody has registered an instance yet.")
             return
+
+        note = None
+        if needed:
+            refusal, note = await force_instance_measurement(interaction, items)
+            if refusal:
+                await interaction.followup.send(refusal, ephemeral=True)
+                return
+        elif not INSTANCE_PINGS and INSTANCE_PING_SECONDS > 0:
+            # Nothing measured yet: the bot has just started, or they are switched
+            # off in the environment. Kick a sweep off in the background rather than
+            # awaiting one here - the interaction is already deferred, but a reader
+            # waiting on a cold Render instance is exactly the case where this
+            # command is wanted to answer instantly. The lines below say what is
+            # happening rather than showing a column of nothing.
+            asyncio.create_task(refresh_instance_pings())
+
+        now = time.monotonic()
         lines = []
         for entry in items[:20]:
             label = entry.get("name") or entry.get("url") or "?"
-            mark = "serving" if entry.get("servingImages") else "no images"
-            lines.append(f"[{label}]({entry.get('url')}) — {mark}")
-        await interaction.followup.send(
-            embed=discord.Embed(
-                title=f"Instances ({len(items)})",
-                description="\n".join(lines),
-                color=discord.Color.magenta(),
+            url = entry.get("url") or ""
+            # The signal is called "images" on GET /instances. Tri-state on
+            # purpose: it stays null until the prober has run, and collapsing
+            # that into a failure would claim we looked when we did not.
+            images = entry.get("images")
+            mark = {True: "serving", False: "image check failed"}.get(
+                images, "not checked yet"
+            )
+            lines.append(f"[{label}]({url}) — {mark} · {describe_ping(url, now)}")
+        body = "\n".join(lines)
+
+        embed = discord.Embed(
+            title=f"Instances ({len(items)})",
+            # The note goes above the list rather than in the footer, which is
+            # already carrying the provenance of the numbers.
+            description=f"*{note}*\n\n{body}" if note else body,
+            color=discord.Color.magenta(),
+        )
+        # Whose line these were measured on. The figure is about this bot's
+        # connection to somebody else's server, which is neither the reader's
+        # connection to it nor the index's, and an unlabelled millisecond number
+        # invites exactly the wrong conclusion from the one person it is shown to.
+        # text= is not optional decoration. Every setter on Embed is keyword-only,
+        # so a positional string raises TypeError at send time rather than at
+        # import, and a bot that has been running happily all day gives no other
+        # warning that the command is broken.
+        embed.set_footer(
+            text=(
+                f"Latency is this bot's round trip, measured every "
+                f"{describe_age(INSTANCE_PING_SECONDS)}."
+                if INSTANCE_PING_SECONDS > 0
+                else "Latency measurement is switched off on this bot."
             )
         )
+        await interaction.followup.send(embed=embed)
 
     await tree_reply(interaction, run(), private=False)
 
@@ -1536,7 +2050,9 @@ async def on_ready():
         log.error("%s", redact(traceback.format_exc()))
 
     bot.loop.create_task(update_status())
-    bot.loop.create_task(probe_api())
+    bot.loop.create_task(refresh_stats())
+    if INSTANCE_PING_SECONDS > 0:
+        bot.loop.create_task(ping_instances())
 
 
 # What the bot was last asked to do, and when.
@@ -1601,14 +2117,16 @@ ACTIVITY_STATUSES = {
     "stats": (discord.ActivityType.watching, "its own homework"),
 }
 
-# How often to re-measure, for the lines that should not go stale while nobody
-# is talking to the bot.
+# How often /stats/public is read for the catalogue lines in the status
+# rotation. Half an hour: the totals move slowly, and reading them more often
+# than that buys nothing.
 #
-# The edge caches anonymous reads for 60s, so a 60s probe costs one origin
-# request a minute at worst. /stats/public barely changes, so it is read far
-# less often than it is asked for.
-PROBE_SECONDS = 60
-COUNT_REFRESH_SECONDS = 30 * 60
+# This replaced a 60-second interval, and the difference is the point rather than
+# a regression. A 60s request to the origin was a keep-alive - it held a
+# free-tier Render instance awake against its fifteen-minute spin-down, and cost
+# a request a minute to do it. A separate service owns that now, so nothing here
+# is trying to hold anything open.
+STATS_REFRESH_SECONDS = 30 * 60
 
 # A failure this recent is worth reporting even if later calls have succeeded;
 # older than this it is history, and the uptime line takes over.
@@ -1635,9 +2153,9 @@ def human_duration(seconds):
 
 
 def latency_status():
-    if STATS["latency_ms"] is None:
+    ms = fresh_latency_ms()
+    if ms is None:
         return None
-    ms = STATS["latency_ms"]
     if ms < 100:
         return (discord.ActivityType.watching, f"the API, {ms}ms away")
     if ms < 500:
@@ -1673,7 +2191,7 @@ def service_status():
     )
     if since_error is not None and since_error < ERROR_WINDOW_SECONDS:
         ago = human_duration(since_error)
-        if STATS["latency_ms"] is not None:
+        if fresh_latency_ms() is not None:
             return (discord.ActivityType.watching, f"last error {ago} ago, still serving")
         return (discord.ActivityType.playing, f"last error {ago} ago, still trying")
 
@@ -1765,36 +2283,57 @@ async def update_status():
         await asyncio.sleep(random.randint(480, 780))
 
 
-async def probe_api():
-    """Keep the live status lines current without waiting for someone to run a
-    command, which is the whole reason they are worth showing.
+async def refresh_stats():
+    """Keep the catalogue counters current without waiting for a command.
 
-    Two rates: /ping is cheap and tells us latency and whether the API is
-    answering at all, /stats/public is a bigger payload and barely moves, so it
-    is read far less often.
+    This used to ping /ping every 60 seconds against the origin, and the ping's
+    real job was keeping Render awake: a free-tier instance spins down after
+    about fifteen idle minutes, and a 60-second request is what stopped it. A
+    separate service does that job now, so the ping is gone.
 
-    The ping goes to ORIGIN_BASE, not API_BASE, and carries the longer timeout.
-    Through the edge it would be served from a 60s cache on a 60s interval, so
-    it would only reach Render about half the time and would not reliably keep
-    the instance awake; and when the instance had spun down, the 30s default
-    would expire before a cold start finished and record a working API as down.
+    What is left is the reason to keep going at all - /stats/public feeds the
+    catalogue lines in the status rotation, and those return None until
+    something fills them in. Half an hour is far more often than the totals
+    change, and far less often than a keep-alive.
+
+    The origin is expected to be asleep when this runs, so the read carries the
+    long cold-start timeout. Without it a spinning-down Render answers nothing
+    inside the 30s default and a working API gets counted as an error.
     """
     await bot.wait_until_ready()
-    last_counts = 0.0
     while not bot.is_closed():
         try:
-            await api_get("ping", base=ORIGIN_BASE, timeout=PROBE_TIMEOUT_SECONDS)
-            if time.monotonic() - last_counts >= COUNT_REFRESH_SECONDS:
-                # A failed refresh is already counted by api_get; the next round
-                # retries, so there is nothing extra to record here.
-                counts = await api_get("stats/public")
-                STATS["images"] = counts.get("totalImages")
-                STATS["tags"] = counts.get("totalTags")
-                STATS["artists"] = counts.get("totalArtists")
-                last_counts = time.monotonic()
+            counts = await api_get("stats/public", timeout=ORIGIN_TIMEOUT_SECONDS)
+            STATS["images"] = counts.get("totalImages")
+            STATS["tags"] = counts.get("totalTags")
+            STATS["artists"] = counts.get("totalArtists")
         except Exception as e:
-            log.warning("probe failed: %s", redact(str(e)))
-        await asyncio.sleep(PROBE_SECONDS)
+            # A failed refresh is already counted by api_get; the next round
+            # retries, so there is nothing extra to record here.
+            log.warning("stats refresh failed: %s", redact(str(e)))
+        await asyncio.sleep(STATS_REFRESH_SECONDS)
+
+
+async def ping_instances():
+    """Keep the latency figures behind /instances current.
+
+    A task rather than work done inside the command, because measuring means
+    dialling a stranger's server and /instances is public: run inline, anybody in
+    the server could choose when and how many outbound requests this bot makes,
+    and a Render free-tier instance that had spun down would be paying a cold
+    start on somebody else's behalf.
+
+    The command reads the cache. The first sweep runs immediately rather than
+    after the first interval, so a bot that has just started has something to
+    show instead of reporting every entry as unmeasured for a quarter of an hour.
+    """
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await refresh_instance_pings()
+        except Exception as e:
+            log.warning("instance sweep failed: %s", redact(str(e)))
+        await asyncio.sleep(INSTANCE_PING_SECONDS)
 
 
 bot.run(os.environ["DISCORD_TOKEN"], log_handler=None)

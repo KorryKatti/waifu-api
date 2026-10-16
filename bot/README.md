@@ -66,7 +66,8 @@ through the edge cache:
 | `/artist name:` | Five images by an artist, pageable |
 | `/artists` | Artists in the catalogue with image counts |
 | `/version` | Which build is serving — software, version, commit, built at |
-| `/instances` | Other people's deployments and whether they are serving images |
+| `/instances` | Other people's deployments, whether they are serving images, and how long they took to answer from this bot |
+| `/instances needed:true` | Re-measure that latency now (one an hour, whole server) |
 
 These send the bot's API key, so they are gated on `WAIFU_DEBUG_USERS` and every
 reply is **ephemeral** — visible only to whoever ran them, never left in a
@@ -144,6 +145,74 @@ file for the life of the bot.
 The bot sends it as `X-Api-Key`. It must not go through the Worker: the Worker
 forwards `Authorization` but drops `X-Api-Key`, so a key sent that way is
 silently anonymous and every registration fails as forbidden.
+
+### Instance latency
+
+`/instances` also shows how long each listed instance took to answer, measured
+from **this bot's host**. That is not the same number the index's own `uptime`
+signal is built on: uptime comes from the backend's prober on Render, so this is
+a second vantage point rather than a better one, and it is still not the
+reader's — which is why the embed footer says so.
+
+```
+/instances                  the list, with whatever the last sweep measured
+/instances needed:true      measure again now
+```
+
+It is measured, not asked for. A background sweep times `GET {instance}/version`
+on every entry once an hour, and the plain command only reads the result.
+
+Hourly is on purpose. A request to a listed instance is a request to somebody
+else's free-tier deployment, and a sleeping one has to start up to answer it, so
+a fifteen-minute sweep kept those instances marginally warm all day for a number
+that barely moves — inter-region routing drifts over hours, not minutes.
+
+`needed:true` is the exception, and it is **limited to one per hour across the
+whole server** for the same reason `/register` is: the thing being limited is
+not the person but this bot's connection and other people's servers. Per-user
+limits would let a channel-full of members each trigger a sweep in the same
+minute. It costs about as much wall-clock as the slowest instance (3s), because
+the measurements run concurrently, and the reply is deferred first.
+
+Four things the numbers deliberately are not:
+
+| | |
+| --- | --- |
+| **Not a score, and not a ranking** | Entries stay in index order and are not colour-coded. The index publishes components, never a grade |
+| **Not the image check** | Only `/version` is fetched. Whether images resolve is the backend prober's job, and repeating it would spend the operator's CDN |
+| **Not a verdict on an instance** | Unmeasured, unreachable and slow read differently. An entry is never dropped and never reordered because of a figure |
+| **Not the reader's latency** | A millisecond count from this machine tells a reader on another continent nothing about their own connection. The URL is the thing they can act on |
+
+A figure is labelled with its age once it is more than two sweeps old, and a
+non-2xx handshake is shown as e.g. `12 ms (HTTP 404)` — a fast 404 is a fast
+host answering a request it should not have been asked, and reporting it as a
+quick handshake would be a measurement of the wrong thing.
+
+Set `INSTANCE_PING_SECONDS=0` to switch the sweep off. The command then reports
+the index alone and says that it is doing so; `needed:true` still works, since
+it is the only measurement there would be.
+
+## Keeping the API awake
+
+The bot used to `GET /ping` the API origin every 60 seconds. That was not a
+health check so much as a keep-alive: Render spins a free-tier instance down
+after about fifteen idle minutes, and a request a minute is what stopped it.
+
+**It no longer does this.** Something else owns that job now. What remains is a
+`/stats/public` read every half hour, which feeds the catalogue lines in the
+status rotation, and half an hour is well past the spin-down threshold — so it
+does not hold anything open either.
+
+Two consequences worth knowing:
+
+- **The status line's API latency is now only as fresh as real traffic.** With
+  the probe gone there is no 60-second heartbeat refreshing it, so a reading
+  older than 15 minutes is not shown at all and the slot falls back to a fixed
+  line. That is the honest rendering: on a quiet day the bot genuinely does not
+  know. `!stats` says how old the last reading was.
+- **Cold starts are now the normal case for anything hitting the origin**, so
+  reads that may meet a sleeping instance use a 90-second timeout. Timing out
+  mid-wake would record a working API as an error.
 
 ## The status line
 
@@ -230,6 +299,11 @@ uv run python bot.py
 | `NSFW_CHANNELS` | empty | Extra channel IDs allowed to get NSFW results (adds to Discord's own age-restricted channels) |
 | `WAIFU_DEBUG_USERS` | empty | Discord account ids allowed to run the credentialed slash commands. Empty disables them |
 | `WAIFU_API_TEST_KEY` | `WAIFU_ADMIN_API_KEY` | Credential those commands send. Point it at a lesser account |
+| `WAIFU_ADMIN_API_KEY` | empty | Enables `/register`. Without it the command says so |
+| `REGISTER_COOLDOWN_SECONDS` | `3600` | Minimum gap between registrations, whole server |
+| `INSTANCE_OPERATOR_ROLE` | empty | Role granted to whoever's instance is on the index |
+| `INSTANCE_PING_SECONDS` | `3600` | How often `/instances` re-measures latency. `0` switches the sweep off |
+| `INSTANCE_PING_COOLDOWN_SECONDS` | `3600` | Minimum gap between `needed:true` measurements, whole server |
 
 ### The rate limit
 
