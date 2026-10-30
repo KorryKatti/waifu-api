@@ -1,13 +1,14 @@
 name: waifu-api-preprod
 services:
   backend:
+    # Mirrors the Render service: the Go backend, built from source with the
+    # build context at backend/go. See docker-compose.yml for the reasoning.
     build:
-      context: ./backend
+      context: ./backend/go
       dockerfile: Dockerfile
     env_file:
       - .env.preprod
     environment:
-      - ASPNETCORE_ENVIRONMENT=Production
       - ConnectionStrings__DefaultConnection=Host=${POSTGRES_HOST};Port=${POSTGRES_PORT};Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
     ports:
       - "${BACKEND_PORT}:8080"

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -17,38 +18,14 @@ import (
 func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 	base := s.cfg.BasePathOrRoot()
 
-	mux.HandleFunc("GET "+base+"auth/discord", s.handleDiscordLoginStart)
-	mux.HandleFunc("POST "+base+"auth/discord/callback", s.handleDiscordCallback)
+	mux.HandleFunc("POST "+base+"auth/discord", s.handleDiscordCallback)
 
 	mux.HandleFunc("GET "+base+"users/me", s.handleGetMe)
 	mux.HandleFunc("GET "+base+"users/me/permissions", s.handleGetMyPermissions)
 
-	mux.HandleFunc("GET "+base+"api-keys", s.handleListAPIKeys)
-	mux.HandleFunc("POST "+base+"api-keys", s.handleCreateAPIKey)
-	mux.HandleFunc("DELETE "+base+"api-keys/{id}", s.handleDeleteAPIKey)
-}
-
-// discordLoginResponse tells the frontend where to send the browser.
-type discordLoginResponse struct {
-	// AuthorizeURL is the Discord authorisation endpoint with the configured
-	// client id and redirect URI already applied.
-	AuthorizeURL string `json:"authorizeUrl"`
-}
-
-// handleDiscordLoginStart serves GET /auth/discord.
-//
-// It returns a URL rather than redirecting, so the frontend controls the
-// navigation and can carry its own state.
-func (s *Server) handleDiscordLoginStart(w http.ResponseWriter, r *http.Request) {
-	if err := s.discord.Validate(); err != nil {
-		s.logError(r, "discord login start", err)
-		apierror.Internal("Discord login is not configured.").Write(w, r.URL.Path)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, discordLoginResponse{
-		AuthorizeURL: s.discord.AuthorizeURL(r.URL.Query().Get("state")),
-	})
+	mux.HandleFunc("GET "+base+"auth/api-keys", s.handleListAPIKeys)
+	mux.HandleFunc("POST "+base+"auth/api-keys", s.handleCreateAPIKey)
+	mux.HandleFunc("DELETE "+base+"auth/api-keys/{id}", s.handleDeleteAPIKey)
 }
 
 // discordCallbackRequest is the POST body from the frontend.
@@ -73,7 +50,11 @@ type authResponse struct {
 	User      *models.UserMinimal `json:"user"`
 }
 
-// handleDiscordCallback serves POST /auth/discord/callback.
+// handleDiscordCallback serves POST /auth/discord.
+//
+// The path is /auth/discord rather than a /callback suffix because that is what
+// the frontend posts to from Callback.tsx; the browser never hits this route
+// directly, the SPA forwards the code to it.
 //
 // It exchanges the code, fetches the profile, upserts the user and issues a JWT.
 // The upsert deliberately does not touch the stored role: promotion is an
@@ -112,11 +93,22 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 
 	avatarURL := profile.AvatarURL(256)
 
-	user, err := s.repo.UpsertUserByDiscordID(ctx, profile.ID, profile.Username, &avatarURL)
+	user, isNew, err := s.repo.UpsertUserByDiscordID(ctx, profile.ID, profile.Username, &avatarURL)
 	if err != nil {
 		s.logError(r, "upsert user", err)
 		internalServerError(w, r)
 		return
+	}
+
+	// A first login also creates the user's default "Favorites" album. Without
+	// it the like button would 404 until the user happened to create an album,
+	// because the frontend addresses the default album by name.
+	if isNew {
+		if _, err := s.repo.EnsureDefaultAlbum(ctx, user.ID, "Favorites"); err != nil {
+			s.logError(r, "create default album", err)
+			internalServerError(w, r)
+			return
+		}
 	}
 
 	// A blacklisted account must not receive a token, even though the
@@ -236,11 +228,18 @@ func (s *Server) handleGetMyPermissions(w http.ResponseWriter, r *http.Request) 
 // The plaintext is never returned. It is present exactly once, in the response
 // to the create call, because only its hash is stored.
 type apiKeyDto struct {
-	ID             int64   `json:"id"`
-	Description    string  `json:"description"`
-	CreatedAt      string  `json:"createdAt"`
-	LastUsedAt     *string `json:"lastUsedAt,omitempty"`
-	ExpirationDate *string `json:"expirationDate,omitempty"`
+	ID          int64  `json:"id"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"createdAt"`
+	// LastUsedAt and ExpirationDate carry no omitempty on purpose. ASP.NET Core
+	// is configured without a DefaultIgnoreCondition, so the C# service emits an
+	// explicit null for an unset DateTime?; dropping the key instead is a
+	// different shape for a client that checks for its presence.
+	LastUsedAt     *string `json:"lastUsedAt"`
+	ExpirationDate *string `json:"expirationDate"`
+	// UserID is the owner. It was missing here while the C# ApiKeyDto carries
+	// it, which made the field read as undefined for every client.
+	UserID int64 `json:"userId"`
 }
 
 // createAPIKeyResponse includes the one-time plaintext.
@@ -250,7 +249,10 @@ type createAPIKeyResponse struct {
 	Key string `json:"key"`
 }
 
-// handleListAPIKeys serves GET /api-keys.
+// handleListAPIKeys serves GET /auth/api-keys.
+//
+// The /auth prefix is not decoration: the frontend addresses these as
+// /auth/api-keys, so serving them at /api-keys would 404 every key screen.
 func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	caller := s.requireAuth(w, r)
 	if caller == nil {
@@ -268,7 +270,14 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	for _, key := range keys {
 		dtos = append(dtos, toAPIKeyDto(key))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"result": dtos})
+
+	// A bare array, because that is what AuthController returns: `Ok(keys)`
+	// serialises List<ApiKeyDto> with no envelope. The frontend destructures the
+	// response straight into ApiKeyDto[], so wrapping it in {"result": ...} gave
+	// that page an object where it expected an array, and it died on
+	// keys.map - a crash on a working feature that no Go test could see,
+	// because the response was well-formed and only disagreed with the contract.
+	writeJSON(w, http.StatusOK, dtos)
 }
 
 // createAPIKeyRequest is the POST body.
@@ -278,6 +287,10 @@ type createAPIKeyRequest struct {
 	// ExpiresInDays is optional. Zero means the key does not expire.
 	ExpiresInDays int `json:"expiresInDays"`
 }
+
+// minAPIKeyDescriptionLength matches the MinimumLength(3) rule on
+// CreateApiKeyRequestValidator.Description.
+const minAPIKeyDescriptionLength = 3
 
 // handleCreateAPIKey serves POST /api-keys.
 //
@@ -300,6 +313,21 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, r, apierror.UnprocessableEntity("A description is required.").
 			WithExtra("errors", map[string][]string{
 				"Description": {"A description is required."}}))
+		return
+	}
+
+	// CreateApiKeyRequestValidator sets MinimumLength(3) on Description, so the
+	// C# service answers 400 for a shorter one. Without this the two disagree on
+	// the same request: a client written against the reference implementation
+	// gets a rejection there and a created key here.
+	//
+	// The message is matched too, because it is the only thing in the response
+	// a client sees and it is asserted on.
+	if len([]rune(description)) < minAPIKeyDescriptionLength {
+		writeAPIError(w, r, apierror.BadRequest("See errors property for details.").
+			WithExtra("errors", map[string][]string{
+				"Description": {fmt.Sprintf("Description must be at least %d characters long.",
+					minAPIKeyDescriptionLength)}}))
 		return
 	}
 
@@ -331,8 +359,13 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, createAPIKeyResponse{
-		apiKeyDto: toAPIKeyRecordDto(created),
+	// AuthController.CreateApiKey answers CreatedAtAction, which is 201 with a
+	// Location header. It pointed at GetApiKeys with a null route value, so the
+	// header addresses the collection rather than the new key; this matches that
+	// rather than inventing the resource URL the C# never emitted.
+	w.Header().Set("Location", r.URL.Path)
+	writeJSON(w, http.StatusCreated, createAPIKeyResponse{
+		apiKeyDto: toAPIKeyRecordDto(created, caller.UserID),
 		Key:       plaintext,
 	})
 }
@@ -366,6 +399,7 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 func toAPIKeyDto(key models.APIKey) apiKeyDto {
 	dto := apiKeyDto{
 		ID:          key.ID,
+		UserID:      key.UserID,
 		Description: key.Description,
 		CreatedAt:   key.CreatedAt.Format("2006-01-02T15:04:05.000Z07:00"),
 	}
@@ -396,9 +430,10 @@ var _ = auth.TokenTTL
 // The record returned by creation carries a *time.Time, while the stored form
 // uses formatted strings, so this bridges the two without changing either
 // representation.
-func toAPIKeyRecordDto(record repo.APIKeyRecord) apiKeyDto {
+func toAPIKeyRecordDto(record repo.APIKeyRecord, userID int64) apiKeyDto {
 	dto := apiKeyDto{
 		ID:          record.ID,
+		UserID:      userID,
 		Description: record.Description,
 		CreatedAt:   record.CreatedAt.Format("2006-01-02T15:04:05.000Z07:00"),
 	}

@@ -1,11 +1,19 @@
 name: waifu-api
 services:
   backend:
-    image: ghcr.io/waifu-im/waifu-api-backend:${IMAGE_TAG}
+    # Built from source rather than pulled, because that is how the Render
+    # service is configured: Dockerfile backend/go/Dockerfile, build context
+    # backend/go. No image is published for the Go service, so there is nothing
+    # to pull and building locally is what keeps the two environments the same.
+    build:
+      context: ./backend/go
+      dockerfile: Dockerfile
     env_file:
       - .env
     environment:
-      - ASPNETCORE_ENVIRONMENT=Production
+      # The Go service reads its whole configuration from the environment and
+      # defaults to "production" when nothing is set, so the .NET-specific
+      # ASPNETCORE_ENVIRONMENT is no longer needed here.
       - ConnectionStrings__DefaultConnection=Host=${POSTGRES_HOST};Port=${POSTGRES_PORT};Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
     ports:
       - "${BACKEND_PORT}:8080"

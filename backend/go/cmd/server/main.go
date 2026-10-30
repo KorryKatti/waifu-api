@@ -24,9 +24,12 @@ import (
 	"time"
 
 	"waifuapi/internal/auth"
+	"waifuapi/internal/background"
+	"waifuapi/internal/cdncache"
 	"waifuapi/internal/config"
 	"waifuapi/internal/discord"
 	"waifuapi/internal/httpapi"
+	"waifuapi/internal/instances"
 	"waifuapi/internal/logging"
 	"waifuapi/internal/repo"
 	"waifuapi/internal/storage"
@@ -46,15 +49,29 @@ func main() {
 // can return an error rather than calling os.Exit, which defers would otherwise
 // skip.
 func run() error {
+	// Uptime is measured from here rather than from package init, so the clock
+	// starts when the service actually begins rather than when it is linked.
+	httpapi.MarkStarted(time.Now())
+
 	// ---- Configuration -------------------------------------------------
 	cfg, err := config.Load(config.NewLoader())
 	if err != nil {
 		return err
 	}
 
+	// LOG_LEVEL is this service's own key. Logging__LogLevel__Default is the
+	// C# key, and an existing deployment will have that one set rather than this
+	// one. Falling back to it means an environment carried over from the C#
+	// service silences logs the way it already does, instead of silently
+	// reverting to info because a key nobody had heard of was unset.
+	level := os.Getenv("LOG_LEVEL")
+	if level == "" {
+		level = os.Getenv("Logging__LogLevel__Default")
+	}
+
 	log := logging.New(logging.Options{
 		Environment: cfg.Environment,
-		Level:       os.Getenv("LOG_LEVEL"),
+		Level:       level,
 	})
 	slog.SetDefault(log)
 
@@ -62,7 +79,22 @@ func run() error {
 		"environment", cfg.Environment,
 		"port", cfg.Port,
 		"base_path", cfg.BasePathOrRoot(),
+		"version", httpapi.BuildVersion,
+		"commit", httpapi.BuildCommit,
+		"builtAt", httpapi.BuildAt,
 	)
+
+	// Logged rather than fatal. An unstamped binary still serves; it just cannot
+	// be told apart from a stale one by anything reading /version, and the build
+	// args are supplied by whoever deploys, which is outside this repository.
+	// The CI image smoke test asserts the opposite — that the stamps are present
+	// — so reaching production unstamped means the build args were not passed.
+	if !httpapi.Stamped() {
+		log.Warn("build identity was not stamped into this binary",
+			"version", httpapi.BuildVersion,
+			"commit", httpapi.BuildCommit,
+			"builtAt", httpapi.BuildAt)
+	}
 
 	// ---- Database ------------------------------------------------------
 	// A generous startup timeout: a cold database or a busy pooler can take a
@@ -119,12 +151,57 @@ func run() error {
 		"bucket", cfg.S3.BucketName,
 		"pathStyle", cfg.S3.ForcePathStyle)
 
-	server := httpapi.NewServer(cfg, db, data, log, files, discordClient, tokens)
+	// Edge cache purging is optional. Without Cloudflare credentials the purger
+	// no-ops, which is correct for a deployment that serves images without the
+	// edge in front, so it must not stop the service from starting.
+	purger := cdncache.New(cdncache.Config{
+		ZoneID:  cfg.Cloudflare.ZoneID,
+		Token:   cfg.Cloudflare.Token,
+		BaseURL: cfg.CDN.BaseURL,
+
+		TransformEnabled: cfg.ImageTransform.Enabled,
+		TransformPath:    cfg.ImageTransform.Path,
+		WidthParam:       cfg.ImageTransform.WidthParam,
+		CardWidth:        cfg.ImageTransform.CardWidth,
+		PreviewWidth:     cfg.ImageTransform.PreviewWidth,
+	}, nil, cacheWarnLogger{log: log})
+
+	if purgerIsConfigured(cfg) {
+		log.Info("cloudflare cache purge enabled", "zone", cfg.Cloudflare.ZoneID)
+	}
+
+	// Built once and shared: the registration endpoint and the daily job must
+	// probe identically, and a second client would double the connection pool
+	// for no reason.
+	prober := instances.NewHTTPProber()
+
+	server := httpapi.NewServer(cfg, db, data, log, files, discordClient, tokens, purger, prober)
 
 	mux := http.NewServeMux()
 	server.Register(mux)
 
 	handler := server.Handler(mux, authenticator, data)
+
+	// ---- Periodic maintenance ------------------------------------------
+	// Started before Serve so a cleanup job can never delay startup, and given
+	// a background context so it stops with the process rather than with the
+	// shutdown of an in-flight request.
+	jobs := []background.Job{background.StatsCleanup(data, backgroundLogger{log})}
+
+	if job, enabled := background.ReviewTaskCleanup(
+		data, cfg.Review.TaskRetentionDays, backgroundLogger{log}); enabled {
+		jobs = append(jobs, job)
+	} else {
+		log.Info("review task pruning disabled", "retentionDays", cfg.Review.TaskRetentionDays)
+	}
+
+	// The instance index is checked on the same daily ticker as the cleanup jobs,
+	// and runs at startup like they do. That startup pass reads the index and
+	// writes back signals; it makes no outbound request for an instance that is
+	// no longer in it, and it deletes nothing.
+	jobs = append(jobs, background.InstanceProbe(data, prober, backgroundLogger{log}))
+
+	background.Start(context.Background(), backgroundLogger{log}, jobs...)
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
@@ -180,3 +257,27 @@ func run() error {
 		return nil
 	}
 }
+
+// purgerIsConfigured reports whether edge purging will actually do anything.
+func purgerIsConfigured(cfg *config.Config) bool {
+	return cfg.Cloudflare.ZoneID != "" && cfg.Cloudflare.Token != ""
+}
+
+// cacheWarnLogger adapts the structured logger to the narrower interface the
+// cache purger needs, so that package does not have to depend on slog.
+type cacheWarnLogger struct{ log *slog.Logger }
+
+func (l cacheWarnLogger) Warn(msg string, err error, args ...any) {
+	if err != nil {
+		l.log.Warn(msg, append([]any{"error", err.Error()}, args...)...)
+		return
+	}
+	l.log.Warn(msg, args...)
+}
+
+// backgroundLogger adapts the structured logger to the maintenance jobs' narrow
+// interface, so that package does not depend on slog.
+type backgroundLogger struct{ log *slog.Logger }
+
+func (l backgroundLogger) Info(msg string, args ...any)  { l.log.Info(msg, args...) }
+func (l backgroundLogger) Error(msg string, args ...any) { l.log.Error(msg, args...) }

@@ -1,27 +1,4 @@
-# Stage 1: Generate OpenAPI spec from backend
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS openapi
-WORKDIR /src
-
-ARG VERSION=0.0.0
-ARG API_BASE_URL
-
-# Copy backend source
-COPY backend/WaifuApi.slnx ./
-COPY backend/WaifuApi.Web/WaifuApi.Web.csproj WaifuApi.Web/
-COPY backend/WaifuApi.Application/WaifuApi.Application.csproj WaifuApi.Application/
-COPY backend/WaifuApi.Domain/WaifuApi.Domain.csproj WaifuApi.Domain/
-COPY backend/WaifuApi.Infrastructure/WaifuApi.Infrastructure.csproj WaifuApi.Infrastructure/
-
-RUN dotnet restore "WaifuApi.Web/WaifuApi.Web.csproj"
-
-COPY backend/ .
-
-# Generate OpenAPI spec with CI environment
-ENV ASPNETCORE_ENVIRONMENT=CI
-ENV API_BASE_URL=${API_BASE_URL}
-RUN dotnet build WaifuApi.Web/WaifuApi.Web.csproj -c Release /p:OpenApiGenerateDocumentsOnBuild=true /p:Version=${VERSION}
-
-# Stage 2: Build documentation
+# Stage 1: Build documentation
 FROM node:20-alpine AS build
 WORKDIR /app
 
@@ -53,8 +30,8 @@ RUN npm ci
 # Copy docs source
 COPY docs/ .
 
-# Copy generated OpenAPI spec from previous stage
-COPY --from=openapi /openapi/WaifuApi.Web.json ../openapi/
+# Copy the checked-in OpenAPI spec (context is the repository root)
+COPY openapi/WaifuApi.Web.json ../openapi/
 
 # Generate API docs from OpenAPI spec
 RUN npx docusaurus gen-api-docs all
@@ -62,7 +39,7 @@ RUN npx docusaurus gen-api-docs all
 # Build static site
 RUN npm run build
 
-# Stage 3: Serve with nginx
+# Stage 2: Serve with nginx
 FROM nginx:alpine AS final
 
 COPY --from=build /app/build /usr/share/nginx/html

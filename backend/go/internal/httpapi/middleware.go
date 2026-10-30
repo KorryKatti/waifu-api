@@ -68,6 +68,14 @@ func withRecovery(log Logger) middleware {
 //
 // The response status and duration are captured through a thin wrapper rather
 // than a dependency, so the logging contract stays visible in this file.
+//
+// The level is Debug, not Info. At Info this was measured OOM-killing a 512 MB
+// container at sustained load: roughly 5,000 JSON lines a second, written to a
+// stdout pipe nobody was draining. The C# service logs nothing per request at
+// all — it records stats to the database — and production sets
+// Logging__LogLevel__Default=Error, so an Info line here diverged from the
+// reference implementation and filled a memory-limited container for nothing.
+// Debug keeps it available when someone is debugging, where it belongs.
 func withLogging(log Logger) middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +84,7 @@ func withLogging(log Logger) middleware {
 
 			next.ServeHTTP(recorder, r)
 
-			log.Info("request",
+			log.Debug("request",
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", recorder.status,
@@ -134,6 +142,62 @@ func (r *statusRecorder) Flush() {
 // Declaring it here rather than importing slog directly keeps the middleware
 // testable with a tiny fake and keeps the package's dependency surface obvious.
 type Logger interface {
+	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Error(msg string, args ...any)
+}
+
+// withCORS mirrors the C# service's "AllowAll" policy: any origin, any method,
+// any header.
+//
+// This was missing entirely on the first cutover and it took the site down. The
+// failure looked like a network problem rather than a missing feature — browsers
+// refuse to read a cross-origin response that carries no
+// Access-Control-Allow-Origin — and a preflight for anything with an
+// Authorization header or a JSON body got a 405 because Go's mux matches a
+// method exactly. So the frontend saw both a missing header and an outright
+// rejection, for every request.
+//
+// It also does not show up in a route sweep, because a route is a path and a
+// method. Headers are invisible to that kind of check, and the C# side setting
+// did not throw on startup when it was forgotten.
+func withCORS() middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := w.Header()
+			header.Set("Access-Control-Allow-Origin", "*")
+			header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
+
+			// The header names are listed explicitly rather than wildcarded.
+			//
+			// "*" does not cover Authorization. The Fetch standard treats it as
+			// a wildcard over the CORS-safelisted request headers, and
+			// Authorization is deliberately excluded, so a browser ignores it and
+			// then refuses the real request. Chrome says so plainly in the
+			// console:
+			//
+			//   Cross-Origin Request Warning: ... (Reason: When the
+			//   'Access-Control-Allow-Headers' is '*', the 'Authorization' header
+			//   is not covered.)
+			//
+			// and every authenticated call would fail: /users/me, /stats/admin,
+			// /reports, /review/tasks. These three are the headers this service
+			// actually reads, so they are the ones named.
+			header.Set("Access-Control-Allow-Headers",
+				"Origin, Content-Type, Accept, Authorization, X-Api-Key, X-Requested-With")
+			// Without this a browser cannot read a response header such as
+			// Location from a script, even though the request itself is allowed.
+			header.Set("Access-Control-Expose-Headers", "Location, Content-Type")
+
+			// The preflight never reaches a route, because the mux only matches
+			// the methods that were registered. Answering it here is the whole
+			// reason the site worked.
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }

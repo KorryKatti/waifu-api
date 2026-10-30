@@ -2,7 +2,9 @@ package models
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -79,14 +81,49 @@ func PerceptualHashFromBytes(data []byte) (uint64, error) {
 	}
 }
 
+// PerceptualHashToHex renders the hash the way the API exposes it.
+//
+// BitArrayHelper.ToHex copies the bits into a big-endian byte array and prints
+// it as lowercase hex, so the first bit of the hash is the high bit of the first
+// byte. The frontend displays this value on the image page, so the exact
+// formatting is part of the contract.
+func PerceptualHashToHex(hash uint64) string {
+	var bytes [HashBits / 8]byte
+	binary.BigEndian.PutUint64(bytes[:], hash)
+	return hex.EncodeToString(bytes[:])
+}
+
+// PerceptualHashFromHex parses the uppercase X16 form the C# service produces.
+//
+// BitArray.ToString("X16") is what ImageProcessingService.cs writes, and it is
+// also what tools/oracle emits, so this is the inverse of the C# value and the
+// entry point for anything reading a C#-produced hash rather than one this
+// implementation computed.
+//
+// Case-insensitive, because the C# form is uppercase and PerceptualHashToHex
+// here is lowercase, so a round trip through either must work.
+func PerceptualHashFromHex(value string) (uint64, error) {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) != HashBits/4 {
+		return 0, fmt.Errorf("perceptual hash hex must be %d characters, got %d",
+			HashBits/4, len(trimmed))
+	}
+	parsed, err := strconv.ParseUint(trimmed, 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("perceptual hash is not valid hex: %w", err)
+	}
+	return parsed, nil
+}
+
 // HammingDistance returns the number of differing bits between two hashes.
 //
 // This is the metric duplicate detection uses: an upload is rejected when its
 // distance to any stored image is <= 4. See UploadImage/Command.cs.
 //
-// The threshold of 4 was chosen when the hash was assumed stable. PLAN.md
-// section 6.1 establishes it is not, so the threshold needs re-validating once
-// the corpus backfill has run.
+// The threshold of 4 was chosen when the hash was assumed stable. It is not:
+// stored values come from an algorithm that does not reproduce itself (see
+// internal/images/phash), so the threshold needs re-validating once the corpus
+// backfill has run.
 func HammingDistance(a, b uint64) int {
 	diff := a ^ b
 	count := 0
