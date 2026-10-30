@@ -51,3 +51,13 @@ func errorsIsNoCredentials(err error) bool {
 func writeUnauthorized(w http.ResponseWriter, r *http.Request) {
 	apierror.Unauthorized("Authentication is required.").Write(w, r.URL.Path)
 }
+
+// writeBlacklisted refuses a blacklisted account.
+//
+// 403, not 401: the credential resolved fine, so this is an authorization
+// refusal. The detail matches BlacklistMiddleware's wording for an account with
+// no recorded reason, which is the only form available here — the API key lookup
+// does not read BlacklistReason.
+func writeBlacklisted(w http.ResponseWriter, r *http.Request) {
+	apierror.Forbidden("Your account has been blacklisted.").Write(w, r.URL.Path)
+}

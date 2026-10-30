@@ -253,6 +253,54 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, contentTy
 	return nil
 }
 
+// Get reads an object's bytes.
+//
+// A missing object returns ErrNotFound rather than a wrapped provider error, so
+// callers can distinguish an absent image from a broken bucket.
+func (s *S3Store) Get(ctx context.Context, key string) ([]byte, error) {
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("get object %s: %w", key, ErrNotFound)
+		}
+		return nil, fmt.Errorf("get object %s: %w", key, describe(err))
+	}
+	defer out.Body.Close()
+
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read object %s: %w", key, err)
+	}
+	return data, nil
+}
+
+// GetWithFallback reads an image, trying each candidate key in turn.
+//
+// The returned string is the key that actually held the object, so callers
+// writing to disk name the file after what they read rather than after what the
+// catalogue claimed.
+func (s *S3Store) GetWithFallback(ctx context.Context, id int64, extension string) ([]byte, string, error) {
+	candidates := ObjectKeyCandidates(id, extension)
+
+	var lastErr error
+	for _, key := range candidates {
+		data, err := s.Get(ctx, key)
+		if err == nil {
+			return data, key, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			// A transport or permission failure is not an absent object, and
+			// trying the next candidate would only obscure it.
+			return nil, key, err
+		}
+		lastErr = err
+	}
+	return nil, "", lastErr
+}
+
 // Delete removes an object.
 //
 // A missing object is not an error, because the upload rollback calls this after
@@ -334,4 +382,43 @@ func sortStrings(values []string) {
 		}
 		values[j+1] = value
 	}
+}
+
+// List returns every object key in the bucket.
+//
+// Paginated in batches, because a bucket with thousands of images returns a
+// truncated page rather than an error. Continuation is followed until exhausted,
+// and a mid-walk failure returns what was collected along with the error so a
+// partial reconciliation is possible rather than none.
+func (s *S3Store) List(ctx context.Context) ([]string, error) {
+	const pageSize = 1000
+
+	var keys []string
+	var token *string
+
+	for {
+		input := &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			MaxKeys:           aws.Int32(pageSize),
+			ContinuationToken: token,
+		}
+
+		output, err := s.client.ListObjectsV2(ctx, input)
+		if err != nil {
+			return keys, fmt.Errorf("list objects: %w", describe(err))
+		}
+
+		for _, object := range output.Contents {
+			if object.Key != nil {
+				keys = append(keys, *object.Key)
+			}
+		}
+
+		if output.IsTruncated == nil || !*output.IsTruncated || output.NextContinuationToken == nil {
+			break
+		}
+		token = output.NextContinuationToken
+	}
+
+	return keys, nil
 }

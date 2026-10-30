@@ -15,11 +15,10 @@
 //
 // # Perceptual hash
 //
-// The hash is produced by internal/images/phash. See that package and
-// PLAN.md section 6.1: the C# reference is not reproducible against itself, so
-// this implementation does not attempt to match a particular machine's output.
-// It is deterministic and internally consistent, which is what the corpus
-// backfill depends on.
+// The hash is produced by internal/images/phash. See that package: the C#
+// reference is not reproducible against itself, so this implementation does not
+// attempt to match a particular machine's output. It is deterministic and
+// internally consistent, which is what a corpus backfill depends on.
 package imageproc
 
 import (
@@ -179,6 +178,44 @@ func Process(data []byte, fileName, contentType string, limits Limits) (Metadata
 	}, nil
 }
 
+// Hash computes the perceptual hash of image bytes, applying no upload limits.
+//
+// It exists for the corpus backfill, which must fingerprint images that are
+// already stored — including ones that no longer satisfy the current size
+// limits, and would therefore be rejected by Process. Calling Process with
+// permissive limits instead would silently skip those rows and leave them
+// holding a fingerprint from an algorithm that no longer exists.
+//
+// This deliberately repeats the decode-and-hash sequence from Process rather
+// than refactoring it out, so the upload path keeps its exact current shape.
+// The two agree because both call toPackedRGBA and then
+// phash.ComputeHash with phash.DefaultKernel. If Process is ever changed to
+// hash differently, this must change with it, or the backfill fills the column
+// with values the running service would never produce.
+func Hash(data []byte) (uint64, error) {
+	if len(data) == 0 {
+		return 0, errors.New("image data is empty")
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return 0, fmt.Errorf("could not decode image: %w", err)
+	}
+
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return 0, errors.New("image has zero dimensions")
+	}
+
+	rgba, err := toPackedRGBA(img, width, height, bounds)
+	if err != nil {
+		return 0, err
+	}
+
+	return phash.ComputeHash(rgba, width, height, phash.DefaultKernel), nil
+}
+
 // detectAnimation reports whether the source has more than one frame.
 //
 // The C# service reads image.Frames.Count from ImageSharp. The standard
@@ -281,31 +318,4 @@ func roundHalfAway(v float64) float64 {
 		return -float64(int(-v + 0.5))
 	}
 	return float64(int(v + 0.5))
-}
-
-// SniffContentType determines the image type from its bytes.
-//
-// It is used when a client declares a generic content type such as
-// application/octet-stream, which Go's multipart writer does by default and
-// which some HTTP clients do for every part. Returning an empty string means the
-// bytes were not a recognised image, and the caller's allowlist check produces
-// the rejection.
-func SniffContentType(data []byte) string {
-	_, format, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		return ""
-	}
-
-	switch format {
-	case "jpeg":
-		return "image/jpeg"
-	case "png":
-		return "image/png"
-	case "gif":
-		return "image/gif"
-	case "webp":
-		return "image/webp"
-	default:
-		return ""
-	}
 }

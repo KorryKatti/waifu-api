@@ -37,23 +37,15 @@ jobs:
       - name: Fetch all tags
         run: git fetch --tags --force
 
-      - name: Setup .NET (for minver on non-tag builds)
-        if: github.ref_type != 'tag'
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: '10.0.x'
-
       - name: Calculate version
         id: version
-        working-directory: ./backend
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             VERSION="${{ github.ref_name }}"
             VERSION="${VERSION#v}"
           else
-            # Fallback to minver CLI for branch builds
-            dotnet tool install --global minver-cli
-            VERSION=$(minver --tag-prefix v)
+            VERSION=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null | sed 's/^v//')
+            VERSION="${VERSION:-0.0.0}"
           fi
 
           MAJOR=$(echo $VERSION | cut -d. -f1)
@@ -88,34 +80,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Extract metadata (tags, labels) for Docker
-      # https://github.com/docker/metadata-action
-      - name: Extract Docker metadata for Backend
-        id: meta-backend
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend
-          tags: |
-            type=raw,value=latest
-            type=raw,value=v${{ steps.version.outputs.VERSION }}
-            type=raw,value=v${{ steps.version.outputs.MAJOR_MINOR }}
-            type=raw,value=v${{ steps.version.outputs.MAJOR }}
-
-      # Build and push Docker image with Buildx (don't push on PR)
-      # https://github.com/docker/build-push-action
-      - name: Build and push Backend Docker image
-        id: build-and-push-backend
-        uses: docker/build-push-action@v6
-        with:
-          context: ./backend
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta-backend.outputs.tags }}
-          labels: ${{ steps.meta-backend.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.version.outputs.VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # Extract metadata (tags, labels) for Docker
       - name: Extract Docker metadata for Frontend
         id: meta-frontend
         uses: docker/metadata-action@v6
@@ -144,13 +108,6 @@ jobs:
       # repository is public to avoid leaking data.  If you would like to publish
       # transparency data even for private images, pass --force to cosign below.
       # https://github.com/sigstore/cosign
-      - name: Sign the published Backend Docker image
-        if: ${{ github.event_name != 'pull_request' }}
-        env:
-          TAGS: ${{ steps.meta-backend.outputs.tags }}
-          DIGEST: ${{ steps.build-and-push-backend.outputs.digest }}
-        run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
-
       - name: Sign the published Frontend Docker image
         if: ${{ github.event_name != 'pull_request' }}
         env:

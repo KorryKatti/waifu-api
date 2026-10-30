@@ -20,10 +20,13 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+
+	"waifuapi/internal/imageproc"
 )
 
 // Role is a user privilege level.
@@ -150,8 +153,49 @@ type Config struct {
 	CDN   CDNConfig
 	Image ImageConfig
 
+	// Cloudflare is optional. With no credentials the edge cache is simply never
+	// purged, which is correct for a self-hosted instance that does not use the
+	// edge at all, so it must not be a startup failure.
+	Cloudflare CloudflareConfig
+
+	// ImageTransform describes how the frontend requests resized variants. It is
+	// needed to build the exact URLs a cache purge must target: purging a
+	// differently-spelled variant misses the cache entry and the stale image
+	// stays visible.
+	ImageTransform ImageTransformConfig
+
 	// Discord configures OAuth login.
 	Discord DiscordConfig
+
+	// Page sizes are configured per resource, exactly as the C# service does with
+	// the {Feature}__DefaultPageSize / {Feature}__MaxPageSize pairs. They are
+	// separate settings rather than one global pair because the values in use
+	// differ wildly: images default to a single row per request (the gallery is
+	// an infinite scroll over a randomised result set) while tags, artists,
+	// albums, users, reports and the review queue default to 30.
+	Pages PaginationConfig
+}
+
+// PaginationConfig is the per-resource default and maximum page size.
+type PaginationConfig struct {
+	Image       PageSize
+	Tag         PageSize
+	Artist      PageSize
+	Album       PageSize
+	User        PageSize
+	Report      PageSize
+	Review      PageSize
+	StorageDiff PageSize
+}
+
+// PageSize is one resource's pagination limits.
+//
+// Max of 0 or less means "no ceiling", matching PaginationUtils.Normalize in the
+// C# service, which only clamps when maxPageSize > 0. Production sets MaxPageSize
+// to -1 everywhere, so this is the normal case rather than an edge one.
+type PageSize struct {
+	Default int
+	Max     int
 }
 
 // ReviewConfig mirrors the Review__* settings.
@@ -225,6 +269,37 @@ type ImageConfig struct {
 	AnimatedMinHeight int
 	AnimatedMaxWidth  int
 	AnimatedMaxHeight int
+
+	// WebpEnabled gates re-encoding uploads to WebP on ingest. Off by
+	// default: it changes what is stored for every future upload, so it is
+	// opt-in rather than baked in. Mirrors ImageConverter.cs.
+	WebpEnabled bool
+
+	// WebpQuality is 1-100. Defaults to the value the offline migration used.
+	WebpQuality int
+
+	// WebpSourceExtensions is the comma-separated list of eligible source
+	// formats. PNG only by default; see ImageConverter.cs for why JPEG is
+	// excluded.
+	WebpSourceExtensions string
+
+	// WebpMethod is the libwebp effort level, 0-6.
+	WebpMethod int
+}
+
+// WebpConversion projects the WebP settings into the shape the image package
+// takes.
+//
+// Parsing is deferred to that package so the same code path serves this
+// constructor and any future caller, rather than duplicating the defaulting
+// rules in two places.
+func (c ImageConfig) WebpConversion() imageproc.ConversionConfig {
+	return imageproc.ConversionConfig{
+		Enabled:          c.WebpEnabled,
+		Quality:          c.WebpQuality,
+		SourceExtensions: imageproc.ParseConversionSourceExtensions(c.WebpSourceExtensions),
+		Method:           c.WebpMethod,
+	}
 }
 
 // DiscordConfig configures OAuth login.
@@ -232,6 +307,30 @@ type DiscordConfig struct {
 	ClientID     string
 	ClientSecret string
 	RedirectURI  string
+}
+
+// CloudflareConfig configures edge cache purging.
+//
+// Both fields are optional and deliberately so. The C# service reads them
+// through the string indexer and no-ops when they are absent; requiring them
+// here would make the service unstartable on any deployment that serves images
+// without the edge in front.
+type CloudflareConfig struct {
+	ZoneID string
+	Token  string
+}
+
+// ImageTransformConfig mirrors the IMG_TRANSFORM_* settings the frontend also
+// reads. The two implementations must agree on the variant URL format, because
+// a purge is keyed on the cached URL.
+type ImageTransformConfig struct {
+	Enabled bool
+	Path    string
+	// WidthParam is the query parameter carrying the requested width.
+	WidthParam string
+	CardWidth  int
+	// PreviewWidth is the width used by the image page's larger preview.
+	PreviewWidth int
 }
 
 // Loader reads values from the environment, or from an explicit map for tests.
@@ -388,7 +487,11 @@ func Load(l *Loader) (*Config, error) {
 
 	cfg.Port = l.optionalIntOrAccumulate("PORT", 8080, &missing)
 	cfg.BasePath = normalizeBasePath(l.get("API_BASE_PATH"))
-	cfg.DatabaseURL = l.require("ConnectionStrings__DefaultConnection", &missing)
+	databaseURL, err := normalizeConnectionString(l.require("ConnectionStrings__DefaultConnection", &missing))
+	if err != nil {
+		missing = append(missing, err.Error())
+	}
+	cfg.DatabaseURL = databaseURL
 
 	// Upload size is expressed in megabytes in configuration, matching the
 	// Image__MaxUploadSizeMb variable the .NET service uses.
@@ -428,7 +531,14 @@ func Load(l *Loader) (*Config, error) {
 	cfg.Permissions.TagCreationMinRole = l.requireRole("Permissions__TagCreationMinRole", &missing)
 	cfg.Permissions.ArtistCreationMinRole = l.requireRole("Permissions__ArtistCreationMinRole", &missing)
 	cfg.Permissions.ImageUploadMinRole = l.requireRole("Permissions__ImageUploadMinRole", &missing)
-	cfg.Permissions.SubmitEditMinRole = l.requireRole("Permissions__SubmitEditMinRole", &missing)
+	// Permissions::SubmitEditMinRole is declared in ConfigurationKeys and read
+	// nowhere in the C# service, so it must not be able to stop a deployment
+	// from booting. The default is what .env.example documents.
+	submitEditRole, err := l.optionalRole("Permissions__SubmitEditMinRole", RoleUser)
+	if err != nil {
+		missing = append(missing, err.Error())
+	}
+	cfg.Permissions.SubmitEditMinRole = submitEditRole
 
 	// Banner management defaults to Moderator rather than being required,
 	// because unlike the others its absence is not an open door: the fallback
@@ -461,6 +571,26 @@ func Load(l *Loader) (*Config, error) {
 
 	cfg.CDN.BaseURL = l.require("Cdn__BaseUrl", &missing)
 
+	// Edge cache purging. Optional: absent credentials mean the cache is simply
+	// never purged, which is correct for a deployment not using the edge.
+	cfg.Cloudflare.ZoneID = l.get("Cloudflare__ZoneId")
+	cfg.Cloudflare.Token = l.get("Cloudflare__ApiToken")
+
+	transformEnabled, err := l.optionalBool("IMG_TRANSFORM_ENABLED", false)
+	if err != nil {
+		missing = append(missing, err.Error())
+	}
+	cfg.ImageTransform.Enabled = transformEnabled
+	cfg.ImageTransform.Path = l.get("IMG_TRANSFORM_PATH")
+
+	widthParam := l.get("IMG_WIDTH_PARAM")
+	if widthParam == "" {
+		widthParam = "width"
+	}
+	cfg.ImageTransform.WidthParam = widthParam
+	cfg.ImageTransform.CardWidth = l.optionalIntOrAccumulate("IMG_CARD_WIDTH", 640, &missing)
+	cfg.ImageTransform.PreviewWidth = l.optionalIntOrAccumulate("IMG_PREVIEW_WIDTH", 1280, &missing)
+
 	cfg.Image.MinWidth = l.requireInt("Image__MinWidth", &missing)
 	cfg.Image.MinHeight = l.requireInt("Image__MinHeight", &missing)
 	cfg.Image.MaxWidth = l.requireInt("Image__MaxWidth", &missing)
@@ -470,9 +600,47 @@ func Load(l *Loader) (*Config, error) {
 	cfg.Image.AnimatedMaxWidth = l.requireInt("Image__AnimatedMaxWidth", &missing)
 	cfg.Image.AnimatedMaxHeight = l.requireInt("Image__AnimatedMaxHeight", &missing)
 
+	// WebP conversion settings are optional, and default to off.
+	//
+	// The C# service reads these with GetValue<T>, which yields the type's zero
+	// value when the key is absent: false, 0 and an empty string respectively.
+	// The defaults applied here restore the values ImageConverter.cs falls back
+	// to internally, because a quality of 0 would be rejected by the encoder
+	// rather than meaning "unset".
+	cfg.Image.WebpEnabled, err = l.optionalBool("Image__WebpConversionEnabled", false)
+	if err != nil {
+		missing = append(missing, "Image__WebpConversionEnabled")
+	}
+	cfg.Image.WebpSourceExtensions = l.get("Image__WebpSourceExtensions")
+
+	quality, qualityErr := l.optionalInt("Image__WebpQuality", imageproc.DefaultWebpQuality)
+	if qualityErr != nil {
+		missing = append(missing, "Image__WebpQuality")
+	}
+	cfg.Image.WebpQuality = quality
+
+	method, methodErr := l.optionalInt("Image__WebpMethod", imageproc.DefaultWebpMethod)
+	if methodErr != nil {
+		missing = append(missing, "Image__WebpMethod")
+	}
+	cfg.Image.WebpMethod = method
+
 	cfg.Discord.ClientID = l.require("Discord__ClientId", &missing)
 	cfg.Discord.ClientSecret = l.require("Discord__ClientSecret", &missing)
 	cfg.Discord.RedirectURI = l.require("Discord__RedirectUri", &missing)
+
+	// Page sizes. These are required in the C# service too: every query handler
+	// does int.Parse(configuration[key] ?? throw), so an unset value stops the
+	// process from booting. Keeping them required means the two services agree on
+	// what a complete configuration is.
+	cfg.Pages.Image = l.requirePageSize("Image", &missing)
+	cfg.Pages.Tag = l.requirePageSize("Tag", &missing)
+	cfg.Pages.Artist = l.requirePageSize("Artist", &missing)
+	cfg.Pages.Album = l.requirePageSize("Album", &missing)
+	cfg.Pages.User = l.requirePageSize("User", &missing)
+	cfg.Pages.Report = l.requirePageSize("Report", &missing)
+	cfg.Pages.Review = l.optionalPageSize("Review", 30, -1, &missing)
+	cfg.Pages.StorageDiff = l.requirePageSize("StorageDiff", &missing)
 
 	if len(missing) > 0 {
 		sort.Strings(missing)
@@ -488,6 +656,36 @@ func Load(l *Loader) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// requirePageSize reads the Default/Max pair for one resource.
+//
+// Max is deliberately allowed to be zero or negative, because -1 is what
+// production uses and it means "do not clamp".
+func (l *Loader) requirePageSize(prefix string, missing *[]string) PageSize {
+	return PageSize{
+		Default: l.requireInt(prefix+"__DefaultPageSize", missing),
+		Max:     l.requireInt(prefix+"__MaxPageSize", missing),
+	}
+}
+
+// optionalPageSize reads a page size that the C# service does not require.
+//
+// The Review pair is the case that matters. Review:DefaultPageSize and
+// Review:MaxPageSize are declared in ConfigurationKeys but read nowhere in the
+// C# service — not by Program.cs's required list and not by any handler — while
+// every other section's page size is required in both. Requiring them here
+// invented a startup failure the reference implementation does not have, and it
+// was found the hard way: a deployment whose environment is a faithful copy of
+// production's refuses to boot over two keys nothing reads.
+//
+// The defaults match .env.example, so a deployment that sets them behaves
+// exactly as before.
+func (l *Loader) optionalPageSize(prefix string, defaultSize, maxSize int, missing *[]string) PageSize {
+	return PageSize{
+		Default: l.optionalIntOrAccumulate(prefix+"__DefaultPageSize", defaultSize, missing),
+		Max:     l.optionalIntOrAccumulate(prefix+"__MaxPageSize", maxSize, missing),
+	}
 }
 
 // optionalIntOrAccumulate reads an integer with a fallback, recording an error
@@ -603,4 +801,130 @@ func (c *Config) BasePathOrRoot() string {
 		return "/"
 	}
 	return c.BasePath
+}
+
+// normalizeConnectionString makes the configured connection string usable by
+// pgx, whichever format it arrived in.
+//
+// Render's ConnectionStrings__DefaultConnection is in Npgsql's keyword/value
+// form with semicolon separators, because that is what the .NET service reads
+// and what scripts/mirror/mkconn.py emits:
+//
+//	Host=db.example;Port=5432;Database=postgres;Username=u;Password=p
+//
+// pgx does not accept that. Its ParseConfig understands either a postgres://
+// URL or space-separated key=value pairs, so a semicolon-separated string
+// parses to nothing and every field silently falls back to its default — the
+// OS user, a blank database, and a Unix socket. The failure looks like the
+// database being unreachable rather than like a format problem, which is why
+// it is worth converting explicitly and loudly.
+//
+// A value containing "://" is already a URL and is returned untouched.
+func normalizeConnectionString(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("connection string is empty")
+	}
+	if strings.Contains(trimmed, "://") {
+		return trimmed, nil
+	}
+
+	// Npgsql key names mapped onto the ones pgx expects. Unlisted keys are
+	// dropped: passing an unknown keyword to pgx is itself an error, and the
+	// connection string is not the place to fail on an unfamiliar option.
+	rename := map[string]string{
+		"host":                   "host",
+		"port":                   "port",
+		"database":               "dbname",
+		"dbname":                 "dbname",
+		"username":               "user",
+		"user":                   "user",
+		"password":               "password",
+		"applicationname":        "application_name",
+		"search_path":            "search_path",
+		"timeout":                "connect_timeout",
+		"commandtimeout":         "statement_timeout",
+		"connectiontimeout":      "connect_timeout",
+		"sslmode":                "sslmode",
+		"sslfactory":             "",
+		"trustservercertificate": "sslmode",
+		"enlist":                 "",
+		"application name":       "application_name",
+	}
+
+	var out []string
+	seen := make(map[string]bool)
+
+	for _, field := range strings.Split(trimmed, ";") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(field, "=")
+		if !ok {
+			// An unparseable field is dropped rather than guessed at, but only
+			// after the ones that do parse have been kept.
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(name))
+		key = strings.ReplaceAll(key, " ", "")
+
+		pgxKey, known := rename[key]
+		if !known || pgxKey == "" {
+			continue
+		}
+		// Last one wins, matching Npgsql's own behaviour for a repeated key.
+		if seen[pgxKey] {
+			for i, existing := range out {
+				if strings.HasPrefix(existing, pgxKey+"=") {
+					out[i] = pgxKey + "=" + quotePgxValue(strings.TrimSpace(value))
+				}
+			}
+			continue
+		}
+		// Npgsql's enum values are case-insensitive and mkconn.py writes
+		// "SSL Mode=Require"; pgx requires lowercase and rejects "Require"
+		// outright, which would fail the parse rather than degrade.
+		if pgxKey == "sslmode" {
+			value = strings.ToLower(strings.TrimSpace(value))
+		}
+
+		seen[pgxKey] = true
+		out = append(out, pgxKey+"="+quotePgxValue(strings.TrimSpace(value)))
+	}
+
+	if len(out) == 0 {
+		return "", fmt.Errorf("connection string has no recognisable fields: %q", raw)
+	}
+	// pgx reads this instead of contacting a Unix socket, which is what made
+	// the misparse look like an unreachable database.
+	if !seen["host"] {
+		out = append([]string{"host=localhost"}, out...)
+	}
+	return strings.Join(out, " "), nil
+}
+
+// quotePgxValue wraps a value in single quotes when it contains anything that
+// would otherwise split the keyword/value pair, so a password with spaces or
+// semicolons in it survives the round trip.
+func quotePgxValue(value string) string {
+	// Percent-decode first. scripts/mirror/mkconn.py emits
+	// Password=quote(password, safe=''), so the value on Render is escaped and
+	// Npgsql unescapes it when it connects. pgx does not, so passing it through
+	// unchanged would authenticate with the encoded string and fail. A value
+	// that is not valid percent-encoding is left alone, which is the right
+	// default: a literal "%" in a password is likelier than a broken escape.
+	if decoded, err := url.PathUnescape(value); err == nil {
+		value = decoded
+	}
+
+	if value == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(value, " '\\") {
+		return value
+	}
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
+	return "'" + escaped + "'"
 }

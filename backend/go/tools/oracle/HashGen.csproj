@@ -11,8 +11,7 @@
 
   <ItemGroup>
     <!--
-      Versions pinned to EXACTLY what
-      backend/WaifuApi.Infrastructure/WaifuApi.Infrastructure.csproj declares.
+      Versions pinned to EXACTLY what the original C# service declared.
       Any drift here invalidates the golden vectors.
     -->
     <PackageReference Include="CoenM.ImageSharp.ImageHash" Version="1.3.6" />

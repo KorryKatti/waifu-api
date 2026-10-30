@@ -1,40 +1,46 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"waifuapi/internal/apierror"
+	"waifuapi/internal/config"
 )
 
-// Pagination is the envelope every list endpoint returns.
+// PaginatedList is the envelope every list endpoint returns.
 //
-// The field names are the wire contract. The frontend's useResource hook reads
-// items, total, currentPage and totalPages, so renaming any of them breaks
-// pagination in the UI.
-type Pagination struct {
-	CurrentPage int  `json:"currentPage"`
-	TotalPages  int  `json:"totalPages"`
-	Total       int  `json:"total"`
-	HasNextPage bool `json:"hasNextPage"`
-	HasPrevPage bool `json:"hasPrevPage"`
+// This mirrors PaginatedList<T> in the C# service field for field, including the
+// property order, because System.Text.Json emits them in declaration order and
+// the contract is the bytes. The frontend reads data.items, data.pageNumber,
+// data.totalCount and data.totalPages, so renaming or nesting any of these
+// breaks pagination in the UI.
+type PaginatedList struct {
+	Items           any  `json:"items"`
+	PageNumber      int  `json:"pageNumber"`
+	TotalPages      int  `json:"totalPages"`
+	TotalCount      int  `json:"totalCount"`
+	MaxPageSize     int  `json:"maxPageSize"`
+	DefaultPageSize int  `json:"defaultPageSize"`
+	HasPreviousPage bool `json:"hasPreviousPage"`
+	HasNextPage     bool `json:"hasNextPage"`
 }
-
-// Default and maximum page sizes.
-//
-// The C# service defaults to 30 and allows -1 for "no limit". The limit is kept
-// here because an unbounded page over a table with thousands of rows is an easy
-// way to exhaust memory on a 512 MB instance.
-const (
-	defaultPageSize = 30
-	maxPageSize     = 200
-)
 
 // pageParams holds the resolved pagination values.
 type pageParams struct {
-	Page     int
+	// Page is zero-based internally; the API is one-based and the envelope
+	// reports PageNumber one-based again.
+	Page int
+
+	// PageSize is the effective size after clamping.
 	PageSize int
+
+	// Limits are echoed back in the envelope, so the client can render the
+	// pager without knowing the server configuration.
+	Limits config.PageSize
 }
 
 // offset returns the SQL OFFSET for the page.
@@ -42,58 +48,109 @@ func (p pageParams) offset() int {
 	return p.Page * p.PageSize
 }
 
-// parsePagination reads page and pageSize from the query string.
+// pageNumber returns the one-based page number for the envelope.
+func (p pageParams) pageNumber() int { return p.Page + 1 }
+
+// queryParam reads a query string parameter, matching its name case-insensitively.
 //
-// page is one-based in the API and zero-based internally, which keeps the SQL
-// offset trivial while matching what clients expect.
-func parsePagination(r *http.Request) (pageParams, error) {
+// The C# service bound [FromQuery] models, and ASP.NET matches those
+// case-insensitively, so PageSize, pagesize and pageSize have all worked for
+// the whole life of the API. url.Values.Get is an exact map lookup, so every
+// parameter became case-sensitive after the port: PageSize was ignored and the
+// default page size used instead, IsNsfw=True was ignored and SFW-only results
+// returned, and IncludedTags was ignored so a caller filtering to one tag
+// silently received the whole catalogue.
+//
+// Nothing here errors on an unrecognised parameter, which is why it went
+// unnoticed. A client asking for five images got one, and a client asking for
+// a specific tag got everything. Silent wrong answers, not failures.
+func queryParam(query url.Values, name string) string {
+	if value := query.Get(name); value != "" {
+		return value
+	}
+	for key, values := range query {
+		if len(values) > 0 && strings.EqualFold(key, name) {
+			return values[0]
+		}
+	}
+	return ""
+}
+
+// parsePagination reads page and pageSize from the query string and normalises
+// them the way PaginationUtils.Normalize does.
+//
+// Normalisation is deliberately permissive: a non-positive pageSize falls back
+// to the configured default and is then clamped to the configured maximum, and
+// anything below page 1 becomes page 1. The C# service does exactly this, so
+// pageSize=0, pageSize=-1 and page=0 all behave the same way in both. A value
+// that is not an integer at all is still rejected, because silently ignoring it
+// would return a different result set than the client asked for.
+func parsePagination(r *http.Request, limits config.PageSize) (pageParams, error) {
 	query := r.URL.Query()
 
-	page := 0
-	if raw := query.Get("page"); raw != "" {
+	page := 1
+	if raw := queryParam(query, "page"); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil {
-			return pageParams{}, apierror.BadRequest("'page' must be an integer.")
+			return pageParams{}, apierror.BadRequest("The value 'page' is not valid.")
 		}
-		if value < 1 {
-			return pageParams{}, apierror.BadRequest("'page' must be 1 or greater.")
-		}
-		page = value - 1
+		page = value
 	}
 
-	pageSize := defaultPageSize
-	if raw := query.Get("pageSize"); raw != "" {
+	pageSize := limits.Default
+	if raw := queryParam(query, "pageSize"); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil {
-			return pageParams{}, apierror.BadRequest("'pageSize' must be an integer.")
-		}
-		// -1 means "no limit" in the C# service. It is honoured, but clamped so
-		// a single request cannot allocate an unbounded result.
-		if value == -1 || value > maxPageSize {
-			value = maxPageSize
-		}
-		if value < 1 {
-			return pageParams{}, apierror.BadRequest("'pageSize' must be 1 or greater.")
+			return pageParams{}, apierror.BadRequest("The value 'pageSize' is not valid.")
 		}
 		pageSize = value
 	}
 
-	return pageParams{Page: page, PageSize: pageSize}, nil
+	if pageSize <= 0 {
+		pageSize = limits.Default
+	}
+	if limits.Max > 0 && pageSize > limits.Max {
+		pageSize = limits.Max
+	}
+	if page < 1 {
+		page = 1
+	}
+
+	return pageParams{
+		Page:     page - 1,
+		PageSize: pageSize,
+		Limits:   limits,
+	}, nil
 }
 
-// buildPagination computes the envelope for a page of results.
-func buildPagination(p pageParams, total int) Pagination {
+// buildPaginatedList assembles the response envelope for a page of results.
+//
+// items must already be a non-nil slice: a nil slice marshals as null in Go,
+// while the C# service always emits [] for an empty result, and the frontend
+// calls .map and .filter on it directly.
+func buildPaginatedList[T any](p pageParams, items []T, total int) PaginatedList {
+	if items == nil {
+		items = []T{}
+	}
+
 	totalPages := 0
 	if p.PageSize > 0 {
+		// Integer division rounded up, which is what Math.Ceiling does in C# for
+		// the non-negative counts here.
 		totalPages = (total + p.PageSize - 1) / p.PageSize
 	}
 
-	return Pagination{
-		CurrentPage: p.Page + 1,
-		TotalPages:  totalPages,
-		Total:       total,
-		HasNextPage: p.Page+1 < totalPages,
-		HasPrevPage: p.Page > 0,
+	pageNumber := p.pageNumber()
+
+	return PaginatedList{
+		Items:           items,
+		PageNumber:      pageNumber,
+		TotalPages:      totalPages,
+		TotalCount:      total,
+		MaxPageSize:     p.Limits.Max,
+		DefaultPageSize: p.Limits.Default,
+		HasPreviousPage: pageNumber > 1,
+		HasNextPage:     pageNumber < totalPages,
 	}
 }
 
@@ -170,6 +227,63 @@ func parseStringList(r *http.Request, name string) []string {
 		values = append(values, splitAndTrim(raw)...)
 	}
 	return values
+}
+
+// stringListParam reads a repeated or comma-separated list parameter.
+//
+// Both "includedTags=a&includedTags=b" and "includedTags=a,b" are accepted,
+// because clients differ and the C# service accepts both.
+//
+// Unlike parseIntList the values are kept as strings: a tag filter accepts
+// either an id or a slug and the repository decides which, so parsing here would
+// lose information.
+// stringListParam reads a repeatable query parameter, matching its name
+// case-insensitively for the same reason queryParam does. A caller sending
+// IncludedTags had its filter silently dropped, which is the worst shape a
+// filter failure can take: the response is a valid, complete list, just not the
+// one that was asked for.
+func stringListParam(query url.Values, name string) []string {
+	var values []string
+	for _, raw := range query[name] {
+		values = append(values, splitAndTrim(raw)...)
+	}
+	if len(values) > 0 {
+		return values
+	}
+	for key, raws := range query {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		for _, raw := range raws {
+			values = append(values, splitAndTrim(raw)...)
+		}
+	}
+	return values
+}
+
+// truthy interprets a boolean query parameter.
+//
+// ASP.NET Core's bool model binder accepts "true"/"false" case-insensitively
+// and treats everything else as false, so this matches: an unrecognised value is
+// false rather than a 400, which is what the frontend relies on when it sends
+// nothing at all.
+func truthy(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "true")
+}
+
+// parsePositiveInt64 reads a strictly positive integer filter value.
+//
+// Zero is rejected because every caller uses it as an id, and id 0 does not
+// exist in any of the tables these filters address.
+func parsePositiveInt64(value string) (int64, error) {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("value must be positive, got %d", parsed)
+	}
+	return parsed, nil
 }
 
 // splitAndTrim splits on commas and drops empty entries.

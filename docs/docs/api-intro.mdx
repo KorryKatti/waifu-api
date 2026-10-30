@@ -4,6 +4,7 @@ sidebar_position: 0
 sidebar_label: Overview
 title: Overview
 slug: /api
+description: Overview of the REST API - base URL, authentication, response format, error codes and where to find each endpoint.
 ---
 
 import CodeBlock from '@theme/CodeBlock';
@@ -44,6 +45,39 @@ This section contains the full API reference for <AppName />, auto-generated fro
 ## Base URL
 
 <ApiBaseUrlBlock />
+
+## Service index
+
+`GET /` returns a small JSON index: the build this instance is running, followed
+by links to the public reads. It needs no authentication and touches no database,
+so it answers on an instance that is serving from a CDN with no API behind it.
+
+```json
+{
+  "software": "waifu-im",
+  "version": "8.0.0",
+  "commit": "9544404",
+  "builtAt": "2026-10-16T09:12:44Z",
+  "links": {
+    "images": "/images",
+    "tags": "/tags",
+    "artists": "/artists",
+    "banner": "/banner",
+    "stats": "/stats/public",
+    "instances": "/instances",
+    "version": "/version"
+  }
+}
+```
+
+`software`, `version`, `commit` and `builtAt` are the same values `GET /version`
+reports — one build, one answer. Every link is a path on this instance and is
+served without credentials. Paths that match no endpoint still return 404.
+
+:::note
+This endpoint is not part of the generated reference below. Those pages come from
+the checked-in OpenAPI document, which predates it.
+:::
 
 ## Interactive Documentation
 

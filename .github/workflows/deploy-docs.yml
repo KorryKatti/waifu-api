@@ -39,28 +39,9 @@ jobs:
       - name: Fetch all tags
         run: git fetch --tags --force
 
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: "10.0.x"
-
-      - name: Calculate version
-        id: version
-        working-directory: ./backend
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            VERSION="${{ github.ref_name }}"
-            VERSION="${VERSION#v}"
-          else
-            # Fallback to minver CLI for manual dispatch
-            dotnet tool install --global minver-cli
-            VERSION=$(minver --tag-prefix v)
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Generate OpenAPI spec from backend build
-        run: dotnet build backend/WaifuApi.Web/WaifuApi.Web.csproj -c Release /p:OpenApiGenerateDocumentsOnBuild=true /p:Version=${{ steps.version.outputs.VERSION }}
-        env:
-          ASPNETCORE_ENVIRONMENT: CI
+      # The OpenAPI spec is checked in at openapi/WaifuApi.Web.json and read by
+      # docs/docusaurus.config.ts. Regenerating it is a deliberate act, not part
+      # of a docs deploy.
 
       - uses: actions/setup-node@v5
         with:

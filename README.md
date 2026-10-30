@@ -1,196 +1,153 @@
 <div align="center">
   <a href="https://waifu-api-eosin.vercel.app">
-    <img src="frontend/public/brand/logo.jpg" alt="Waifu.im Logo" width="200" style="border-radius: 20px; box-shadow: 0 8px 30px rgba(0,0,0,0.12);">
+    <img src="https://waifu-cdn.waifu-api.workers.dev/8613.jpg" alt="Waifu.im Logo" width="200" style="border-radius: 20px; box-shadow: 0 8px 30px rgba(0,0,0,0.12);">
   </a>
 
   <h1>Waifu.im API</h1>
 
   <p>
     <strong>The versatile waifu image provider.</strong><br>
-    Access a curated archive of over 4000 anime-style images with powerful filtering.
+    4,287 anime-style images with filtering, albums, favourites and moderation.
   </p>
 
   <p>
     <a href="https://waifu-api-eosin.vercel.app"><strong>Website</strong></a> •
     <a href="https://waifu-api-docs.vercel.app"><strong>Documentation</strong></a> •
-    <a href="https://discord.gg/qceZ92p2xK"><strong>Support</strong></a>
+    <a href="https://waifu-api-docs.vercel.app/playground"><strong>Playground</strong></a> •
+    <a href="https://discord.gg/qceZ92p2xK"><strong>Discord</strong></a> •
+    <a href="https://fluxer.gg/ZyNTpyQR"><strong>Fluxer</strong></a>
   </p>
 
   <p>
     <a href="https://stats.uptimerobot.com/AbgWCVWsKT"><img src="https://img.shields.io/badge/instance-live-22c55e?style=flat-square" alt="Instance status"></a>
-    <img src="https://img.shields.io/github/license/waifu-im/waifu-api?style=flat-square&color=5865F2" alt="License">
+    <img src="https://img.shields.io/github/license/KorryKatti/waifu-api?style=flat-square&color=5865F2" alt="License">
     <img src="https://img.shields.io/badge/Docker-Ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
   </p>
 </div>
 
-> **This is a community-run fork.** The original project by
-> [Buco7854](https://github.com/Waifu-im/waifu-api) is being migrated off its
-> original infrastructure. The API contract is unchanged, so existing
-> integrations keep working — but the endpoints moved, and some features are
-> unavailable while the migration is in progress.
+> **Community-run fork.** The original project by
+> [Buco7854](https://github.com/Waifu-im/waifu-api) shut waifu.im down
+> permanently on October 24, 2026. This instance runs in its place and is
+> fully operational: the API contract is unchanged and no features are
+> unavailable.
 
-## 🚧 Instance status
+## 🚧 Instances
 
 | | |
 |---|---|
 | API | `https://waifu-api-031n.onrender.com` |
+| CDN | `https://waifu-cdn.waifu-api.workers.dev` |
 | Website | `https://waifu-api-eosin.vercel.app` |
 | Documentation | `https://waifu-api-docs.vercel.app` |
-| Uploads | Disabled until moderation is sorted out |
-| Users | Discord OAuth works; existing accounts did not carry over |
+| Uploads | Open. Discord login required; images enter a review queue |
+| Users | Discord OAuth works. Existing accounts did not carry over |
 
-Image URLs are served through a Cloudflare Worker in front of a private object
-store, so `Cdn__BaseUrl` points at the Worker rather than at storage directly.
-Response shapes are unchanged.
+### Running your own
+
+Anyone can host their own copy. Image count is deliberately not a signal — one
+image is as valid as ten thousand — and there is no score or ranking.
+
+To be listed, an instance must serve `GET /images?pageSize=1` with `items` and
+`totalCount` and answer a `HEAD` on the URL that listing returned. The `GET
+/version` handshake reports which build it runs; an instance that does not
+implement it can still be listed at an operator's request, and shows no uptime.
+What each check is for, and what the signals mean, is in
+[`docs/docs/instances.mdx`](docs/docs/instances.mdx).
+
+Registration is not self-service. Ask in the
+[Discord](https://discord.gg/qceZ92p2xK) or [Fluxer](https://fluxer.gg/ZyNTpyQR)
+server, and someone will run `/register` or `!register` when they are around.
+
+## ⚡ Choosing a host
+
+Use the CDN for image bytes and anonymous reads; use the API for `X-Api-Key`
+writes. `Authorization: Bearer` works on either. The Worker forwards only
+`Authorization`, `Accept` and `Accept-Language`, so an API-key client pointed at
+the CDN is unauthenticated and receives `401`.
+
+Anonymous reads are edge-cached for 60s. Authenticated requests, and `/users`,
+`/albums`, `/review`, `/auth`, `/reports` and `/stats/admin`, are never cached.
 
 ## ✨ Features
 
-Waifu.im provides a robust REST API designed for ease of use and flexibility.
+- **Archive** — 4,287 images
+- **Tags** — character, style and theme filters
+- **Albums** — user collections
+- **Duplicate detection** — perceptual hashing on upload
+- **Filters** — orientation, resolution, file size, NSFW, GIFs, artists, explicit include/exclude
+- **Accounts** — Discord OAuth for favourites and albums
+- **Moderation** — reports and a review queue
+- **Bots** — working Discord and Fluxer samples in [`bot/`](bot/) and [`bot-fluxer/`](bot-fluxer/)
+- **Statistics** — usage and popular tags
+- **Sorting** — date, popularity, random
 
-- 🖼️ **Extensive Archive**: Over 4000 high-quality images.
-- 🏷️ **Tag-Based Search**: Filter by specific character tags, styles, or themes.
-- 📁 **Albums**: Organize and share collections of images.
-- 👯 **Duplicate Detection**: Automatic detection of duplicate images to maintain quality.
-- 🔍 **Advanced Filtering**:
-  - Filter by orientation (Landscape/Portrait)
-  - Filter by resolution (width/height) and file size
-  - Toggle NSFW/Adult content
-  - Include/Exclude GIFs
-  - Filter by specific Artists
-  - Exclude specific files
-  - Force inclusion of specific files
-- 👤 **User Accounts**: Discord-based authentication to manage favorites and albums.
-- 🛡️ **Moderation Tools**: Report system and review queues for community safety.
-- ⚡ **Performance**: Optimized for speed with caching and CDN integration.
-- 📊 **Statistics**: Track API usage and popular tags.
-- 🎲 **Flexible Sorting**: Sort by date, popularity, or get random results.
+## 🚀 Getting started
 
-## 🚀 Getting Started
+```bash
+git clone https://github.com/KorryKatti/waifu-api.git
+cd waifu-api
+cp .env.example .env          # Discord + storage credentials
+docker-compose up -d
+```
 
-Deploy your own instance of the Waifu.im API using Docker. See
-[`scripts/mirror/`](scripts/mirror/) for tooling that imports a database export
-and mirrors an image archive into any S3-compatible bucket.
+Compose builds the Go backend, the frontend, and Postgres with pgvector. Ports
+come from `.env`: backend `8085`, frontend `8084`, database `5432`. Discord
+redirect URI is `https://<frontend>/auth/callback`.
 
-### Prerequisites
+Native development:
 
-- [Docker](https://docs.docker.com/get-docker/) & [Docker Compose](https://docs.docker.com/compose/install/)
-- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) (for local backend dev)
-- [Node.js 20+](https://nodejs.org/) (for local frontend dev)
-- A [Discord Application](https://discord.com/developers/applications) (for authentication)
-- S3-Compatible Storage (AWS S3, MinIO, Scaleway, etc.)
+```bash
+docker-compose -f docker-compose.dev.yml up -d   # Postgres + Adminer
 
-### 🛠️ Installation (Production)
+cd backend/go  && go run ./cmd/server            # API :8080
+cd frontend    && npm install && npm run dev      # UI  :5173
+```
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/waifu-im/waifu-api.git
-   cd waifu-api
-   ```
+## 🏗️ Backend
 
-2. **Configure Environment**
-   Create your `.env` file from the example:
-   ```bash
-   cp .env.example .env
-   ```
+The service is the Go program in [`backend/go`](backend/go); compose builds it
+and it is what runs in production. Build and test commands, including the
+database the test suite refuses to run without, are in
+[`AGENTS.md`](AGENTS.md#build-and-test).
 
-   Edit `.env` with your credentials.
+## ☁️ Hosting
 
-   **🌐 Production (Example)**
-   ```ini
-   # Backend
-   API_BASE_PATH="/"
-
-   # Frontend
-   VITE_API_URL="https://waifu-api-031n.onrender.com"
-   VITE_DISCORD_REDIRECT_URI="https://waifu-api-eosin.vercel.app/auth/callback"
-   ```
-
-3. **Launch**
-   ```bash
-   docker-compose up -d
-   ```
-
-### 💻 Local Development
-
-For active development, we recommend running the database via Docker and the services natively.
-
-1. **Start Database & Infrastructure**
-   ```bash
-   docker-compose -f docker-compose.dev.yml up -d
-   ```
-   This starts PostgreSQL (with pgvector) and Adminer.
-
-2. **Configure Environment**
-   Ensure your `.env` file is set up for local development:
-   ```ini
-   # Backend
-   API_BASE_PATH="/api"
-
-   # Frontend
-   VITE_API_URL="http://localhost:5261/api"
-   VITE_DISCORD_REDIRECT_URI="http://localhost:5173/auth/callback"
-   ```
-
-3. **Run Backend (.NET)**
-   ```bash
-   cd backend/WaifuApi.Web
-   dotnet run
-   ```
-   The API will be available at `http://localhost:5261`.
-
-4. **Run Frontend (Vite)**
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-   The frontend will be available at `http://localhost:5173`.
-
-### 🔌 Hosting notes
-
-The reference deployment in this fork does not run the API and its images from
-the same host. `Cdn__BaseUrl` points at a Cloudflare Worker rather than at
-storage directly:
-
-| | |
+| Concern | Host |
 |---|---|
-| API | Render — JSON metadata, Postgres queries |
-| Images | Cloudflare Worker — signs SigV4 to a private object store, caches at the edge |
+| API | Render — JSON, Postgres |
+| Images | Cloudflare Worker — SigV4 to a private bucket, edge-cached |
+| Anonymous reads | Cloudflare Worker — proxies to Render, 60s cache |
 
-This matters if you self-host. IDrive (among others) no longer allows public
-buckets to be created, so the Worker exists to fetch from a private one. AWS S3
-or MinIO can be made public directly and don't need it.
+Storage is private and the Worker signs reads from it; credentials are Worker
+secrets, never in `wrangler.toml`. Deploying the Worker and mirroring the archive
+are in [`scripts/mirror/README.md`](scripts/mirror/README.md); the WebP
+conversion rules are in [`AGENTS.md`](AGENTS.md#webp-quality-85).
 
-### 👑 Setting up an Admin User
+No purge reaches a `workers.dev` Worker: bump `CACHE_VERSION` in
+[`scripts/mirror/worker/worker.js`](scripts/mirror/worker/worker.js) and
+redeploy.
 
-To access administrative features (moderation, tag management, etc.), you need to promote your user account.
+## 👑 Admin access
 
-1. **Login**: Go to your frontend URL and log in with Discord.
-2. **Access Database**: Connect to your PostgreSQL database (using the `adminer` service at `http://localhost:8081` or CLI).
-3. **Promote User**: Run the following SQL query, replacing `YOUR_DISCORD_ID` with your actual Discord User ID:
+```sql
+UPDATE "Users" SET "Role" = 3 WHERE "DiscordId" = 'YOUR_DISCORD_ID';
+```
 
-   ```sql
-   UPDATE "Users" 
-   SET "Role" = 3 
-   WHERE "DiscordId" = 'YOUR_DISCORD_ID';
-   ```
-   *(Role 3 corresponds to Admin)*
+`1` TrustedUser · `2` Moderator · `3` Admin.
 
-### Special Thanks
+## 📚 Reference
 
-A huge thank you to our community contributors who help expand our database:
-
-- **[Ruhannn](https://github.com/Ruhannn)** - Curated the `kamisato-ayaka` tag collection.
-- **[Buco7854](https://github.com/Buco7854)** - Original author and maintainer of this project for over three years.
+- [`AGENTS.md`](AGENTS.md) — build and test, deployment fields, storage rules, known traps
+- [`scripts/mirror/README.md`](scripts/mirror/README.md) — database import, archive mirroring, Worker deploy
+- [`docs/docs/instances.mdx`](docs/docs/instances.mdx) — what an instance must expose to be listed
+- [`bot/README.md`](bot/README.md) — sample Discord bot
+- [`bot-fluxer/README.md`](bot-fluxer/README.md) — sample Fluxer bot
 
 ## License
 
-[MPL-2.0](LICENSE) — file-level copyleft. Modify freely; publish any file you
-change. Forking and self-hosting is explicitly welcome.
+[MIT](LICENSE) — permissive. Forking and self-hosting welcome.
 
-Images are third-party artist work, credited per record in the `Images.Source`
-column. This repository distributes the catalogue and the metadata, not a claim
-on the artwork.
+Images are third-party artist work, credited per record in `Images.Source`.
 
 <div align="center">
   <sub>Built with ❤️ by the Waifu.im team and its community fork maintainers.</sub>

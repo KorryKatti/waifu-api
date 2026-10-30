@@ -1,0 +1,180 @@
+---
+sidebar_position: 8
+sidebar_label: Running your own instance
+title: Running your own instance
+description: What an instance has to expose to be listed on the public index, how to get on it, and what the signals on each card mean.
+---
+
+import CodeBlock from '@theme/CodeBlock';
+
+# Running your own instance
+
+Anyone can run their own copy of this API. This page is what yours has to expose
+to be listed on the [instance index](#the-index), and how to get on it.
+
+There is nothing to install from the index and nothing to configure for it. An
+instance is listed because it answers the requests below correctly, and that is
+the whole test — except that an operator may list one without the first, and then
+it shows no uptime. See [What registration does](#what-registration-does).
+
+## What your instance has to expose
+
+Three endpoints, checked once a day and once at registration:
+
+### 1. `GET /version`
+
+The handshake. It says which build is answering, and it must work **with no
+database and no credentials** — a checker has nothing to authenticate with.
+
+<CodeBlock language="json">{`{
+  "software": "waifu-im",
+  "version": "8.0.0",
+  "commit": "9544404",
+  "builtAt": "2026-10-15T09:12:44Z"
+}`}</CodeBlock>
+
+`software` must be present and non-empty. It identifies the *software*, not this
+project, so a fork or a clean reimplementation can answer it too — which is the
+point. The index promises compatibility, not provenance.
+
+`version` is displayed and is **not** scored: it is a string an instance reports
+about itself, so any instance could claim any version.
+
+`builtAt` is the staleness signal. It says how long the deployment has been
+standing still, which is true regardless of whose code it runs. Omit it and the
+field reads *unknown* rather than being guessed at.
+
+### 2. `GET /images?pageSize=1`
+
+A one-item listing. One, not a page — the checker asks for the smallest response
+that proves a client can read the shape.
+
+<CodeBlock language="json">{`{
+  "items": [
+    {
+      "id": 5497,
+      "extension": ".webp",
+      "url": "https://cdn.example/5497.webp",
+      "width": 1000,
+      "height": 1400
+    }
+  ],
+  "pageNumber": 1,
+  "totalPages": 1,
+  "totalCount": 1
+}`}</CodeBlock>
+
+The array is under **`items`**, and **`totalCount`** must be present. Both are
+required: `totalCount` is what a client reads to page, so its presence is what
+distinguishes an image listing from an arbitrary object with an array in it.
+
+An **empty catalogue is allowed**. `items: []` with `totalCount: 0` is a correct
+response, and you can be listed with nothing uploaded — a fresh instance is the
+most partial one there is.
+
+### 3. `HEAD` the `url` from that listing
+
+The URL your `/images` response returned has to resolve. This is the check that
+matters most, and it is the one nothing else substitutes for.
+
+It exercises the `Image.Extension` ↔ `{id}{ext}` key invariant end to end. An
+instance whose rows name a format the bucket does not hold returns a URL for an
+object that is not there — a 404 handed to a client rather than to the storage
+layer. `/version` and `/images` both answer perfectly in that situation.
+
+Serve that `url` from wherever you serve images from: a CDN, a Worker, the origin.
+It does not have to be the same host as your API.
+
+## Getting on the index
+
+Run the command in the [Discord server](https://discord.gg/qceZ92p2xK) or
+[Fluxer server](https://fluxer.gg/ZyNTpyQR) with your instance URL. The syntax
+differs by platform:
+
+```
+/register url:https://waifu.example name:My Instance
+```
+
+```
+!register https://waifu.example My Instance
+```
+
+The first is Discord's slash command; the second is Fluxer's prefix command.
+
+**Anyone can run it.** The bot holds the credential, not you, so there is no role
+to be given and nothing to ask permission for. The entry is recorded against the
+account you ran it from, which is how the operator role is granted.
+
+<div style={{borderLeft: '4px solid var(--ifm-color-primary)', paddingLeft: '1rem'}}>
+
+**The bot is not always online.** It runs when the operator has it running, which
+is most of the time not, so the command may not answer straight away. That is
+expected rather than broken — if nothing comes back, ask in the Discord or
+Fluxer server rather than messaging anyone directly.
+
+</div>
+
+### What registration does
+
+It probes your instance with the three checks above **before storing anything**.
+If your instance cannot answer, it is refused rather than listed as working —
+which is the whole point of the list, since a link that 404s is the one outcome a
+reader of it is trying to avoid.
+
+Running the command twice is safe. Re-registering does not overwrite your entry,
+its owner or its history. That matters more than it sounds: an overwrite would
+reset the check history, which would report a fresh month of perfect uptime for an
+instance that has in fact been failing.
+
+**The operator can list an instance without the handshake.** A deployment may
+serve a correct catalogue and simply not implement this index's `GET /version` —
+nothing is wrong with it, it just was not built against these checks. Such an
+entry is stored *unverified*, and everything that can still be measured is
+published: its **catalogue** and **images** signals are real observations. Only
+**uptime** stays unknown, because a check here is defined over the handshake. The
+daily pass promotes it to an ordinary entry the first day it answers.
+
+## The index
+
+Every registered instance is listed with the signals below, shown **separately**
+rather than combined into a score.
+
+| Signal | What it means |
+| --- | --- |
+| **uptime** | Checks passed ÷ checks over the trailing 30 days. *Unknown* means no checks have run yet, which is not the same as zero. |
+| **images** | The `url` your listing returned resolved. |
+| **catalog** | `/images` returned the expected shape. |
+| **built …d ago** | Days since the build timestamp your `/version` reported. |
+| **refused** | The instance answered the checker with an access refusal (401, 403 or 429) instead of a result. Usually its own firewall or bot rule against the checker's network, so the catalogue and image checks are shown as unknown rather than failed. |
+| **last checked** | When the signals above were observed. |
+| **running this repository's code** | Only when the `commit` you reported resolves in this repository's history. |
+
+**There is no score, and no ranking.** A single number hides its own weights,
+and the person it is about is the one who would have to trust it. Named
+components sort just as well and can be checked: if a card claims 99% uptime and
+you have watched that instance 404 all week, you know something.
+
+**Image count is deliberately not a signal.** Partial instances are explicitly
+welcome. Counting images would penalise exactly the thing this is trying to
+encourage.
+
+**A failing check never removes you.** An instance that sleeps for hours is a
+working instance with an idle one, so a failure is recorded as a failure and the
+entry stays.
+
+**`commit` is not required.** If the commit you report resolves nowhere, the
+lineage fields are absent and read *could not tell* — which is different from
+*behind*, because a fork has no shared history to measure against.
+
+## Notes for operators
+
+- **Your base URL is an origin.** `https://example.com/api/` normalises to
+  `https://example.com`. One instance is one entry, whichever way it is spelled.
+- **List the origin or the CDN, not both.** They are the same instance, and two
+  entries for one deployment is one entry too many.
+- **HTTPS is the default.** A bare hostname is treated as `https://`. Serving
+  over plain HTTP is allowed for a private instance on a LAN; forcing TLS would
+  push someone to publish a private service to the internet to get a listing.
+- **Private addresses cannot be registered.** Loopback and RFC1918 ranges are
+  refused, because the check runs on the address actually dialled. Registering a
+  LAN instance from this index will not work — it has to be reachable.

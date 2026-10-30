@@ -15,10 +15,12 @@ const sidebars: SidebarsConfig = {
   docs: [
     "intro",
     "getting-started",
+    "discord-bot",
     "authentication",
     "rate-limiting",
     "versioning",
     "tags",
+    "instances",
     "terms-of-service",
   ],
   api: [

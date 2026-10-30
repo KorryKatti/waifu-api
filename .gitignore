@@ -17,3 +17,8 @@ docs/docs/api
 # Mirror scripts
 scripts/mirror/.env
 scripts/mirror/__pycache__/
+
+# Fluxer bot state
+bot-fluxer/register_log.json
+bot-fluxer/instance_ping_log.json
+bot-fluxer/bot-fluxer

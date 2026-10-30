@@ -20,6 +20,7 @@ import StorageDiff from './pages/StorageDiff';
 import Contact from './pages/Contact';
 import SiteBannerSettings from './pages/SiteBannerSettings';
 import NotFound from './pages/NotFound';
+import Instances from './pages/Instances';
 
 function App() {
     return (
@@ -45,6 +46,7 @@ function App() {
                 <Route path="storage-diff" element={<StorageDiff />} />
                 <Route path="site-banner" element={<SiteBannerSettings />} />
                 <Route path="contact" element={<Contact />} />
+                <Route path="instances" element={<Instances />} />
                 <Route path="auth/callback" element={<Callback />} />
                 <Route path="*" element={<NotFound />} />
             </Route>

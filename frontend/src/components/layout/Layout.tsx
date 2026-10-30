@@ -4,7 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import {
     Sun, Moon, Menu, X, LogOut, Upload as UploadIcon,
     Home, Image as ImageIcon, Tag as TagIcon, ChevronRight, PanelLeft,
-    User as UserIcon, Library, ChevronDown, Palette, Key, Users as UsersIcon, Flag, BarChart, Monitor, Book, Mail, Activity, HardDrive, Github, FileText, GitPullRequest, Megaphone
+    User as UserIcon, Library, ChevronDown, Palette, Key, Users as UsersIcon, Flag, BarChart, Monitor, Book, Mail, Activity, HardDrive, Github, FileText, GitPullRequest, Megaphone, Server
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -283,6 +283,24 @@ const Layout = () => {
                                         {!isSidebarCollapsed && <span>Terms of Service</span>}
                                     </a>
                                 )}
+
+                                {/* Always shown, unlike the links above it: the index is
+                                    the feature that makes self-hosting findable, and
+                                    hiding it behind a configuration flag would mean the
+                                    one page a new operator needs is the one page that
+                                    can be absent. */}
+                                <Link
+                                    to="/instances"
+                                    className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all ${
+                                        isActive('/instances')
+                                            ? 'bg-secondary text-foreground font-bold'
+                                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                                    } ${isSidebarCollapsed ? 'justify-center' : ''}`}
+                                    title={isSidebarCollapsed ? 'Instances' : ''}
+                                >
+                                    <Server size={22} className="shrink-0" />
+                                    {!isSidebarCollapsed && <span>Instances</span>}
+                                </Link>
 
                                 {showContact && (
                                     <Link

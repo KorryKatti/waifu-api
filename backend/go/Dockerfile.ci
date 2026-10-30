@@ -16,20 +16,30 @@ COPY . .
 RUN go vet ./... && go test ./...
 
 # ---- Build ----------------------------------------------------------------
-FROM golang:1.27-alpine AS build
+FROM golang:1.27-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-ARG VERSION=0.0.0-local
-RUN CGO_ENABLED=0 GOOS=linux go build \
+ARG VERSION=0.0.0-dev
+ARG COMMIT=unknown
+ARG BUILT_AT=
+RUN BUILT_AT="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
+    CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
-      -ldflags="-s -w -X main.version=${VERSION}" \
+      -ldflags="-s -w \
+        -X waifuapi/internal/httpapi.BuildVersion=${VERSION} \
+        -X waifuapi/internal/httpapi.BuildCommit=${COMMIT} \
+        -X waifuapi/internal/httpapi.BuildAt=${BUILT_AT}" \
       -o /out/server \
       ./cmd/server
 
 # ---- Runtime --------------------------------------------------------------
-FROM gcr.io/distroless/static-debian12:nonroot
+# Must match the runtime stage of ./Dockerfile. See that file for why this is
+# base rather than static: the alpine build stage produced a musl binary that
+# could not start here, and the WebP encoder keeps the binary dynamically
+# linked even under CGO_ENABLED=0.
+FROM gcr.io/distroless/base-debian12:nonroot
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/server /server
