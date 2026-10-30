@@ -1,5 +1,5 @@
 ﻿import { Link } from 'react-router-dom';
-import { ArrowRight, Book, Wifi, WifiOff, Image as ImageIcon, Tag as TagIcon, Users, Activity } from 'lucide-react';
+import { ArrowRight, Book, Wifi, WifiOff, Image as ImageIcon, Tag as TagIcon, Users, Activity, Copy, Check, Terminal } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import api from '../services/api';
 import { ImageDto, PaginatedList, NsfwMode, Orientation, AnimatedMode } from '../types';
@@ -29,8 +29,22 @@ const Home = () => {
     const [isLoading, setIsLoading] = useState<boolean>(true);
     const [stats, setStats] = useState<PublicStats | null>(null);
     const [loadingStats, setLoadingStats] = useState<boolean>(true);
+    const [copied, setCopied] = useState(false);
 
     const docsUrl = getEnv('VITE_DOCS_URL');
+
+    const apiBase = (getEnv('VITE_API_URL') || '/api').replace(/\/$/, '');
+    const apiOrigin = /^https?:\/\//.test(apiBase)
+        ? apiBase
+        : `${window.location.origin}${apiBase}`;
+    const quickstart = `curl "${apiOrigin}/images?includedTags=waifu&isNsfw=false&pageSize=1"`;
+
+    const copyQuickstart = () => {
+        navigator.clipboard.writeText(quickstart).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        }).catch(() => {});
+    };
 
     useEffect(() => {
         const fetchHero = async () => {
@@ -179,6 +193,24 @@ const Home = () => {
                             <Book size={20} /> API Docs
                         </a>
                     )}
+                </div>
+
+                <div className="max-w-2xl mx-auto w-full pt-2">
+                    <div className="flex items-center justify-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+                        <Terminal size={14} /> Try the API
+                    </div>
+                    <div className="relative bg-card/75 dark:bg-card/90 backdrop-blur-md border border-border rounded-xl shadow-sm">
+                        <pre className="overflow-x-auto p-4 pr-14 text-left text-xs sm:text-sm font-mono text-foreground">
+                            <code>{quickstart}</code>
+                        </pre>
+                        <button
+                            onClick={copyQuickstart}
+                            aria-label={copied ? 'Copied' : 'Copy API command'}
+                            className="absolute top-2 right-2 p-2 rounded-lg bg-secondary hover:bg-secondary/80 text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                            {copied ? <Check size={16} className="text-emerald-500" /> : <Copy size={16} />}
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
