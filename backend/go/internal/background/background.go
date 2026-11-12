@@ -54,19 +54,36 @@ type Job struct {
 // and the loop continues, because a transient database problem at 3am must not
 // permanently disable cleanup.
 func Start(ctx context.Context, log Logger, jobs ...Job) {
-	for _, job := range jobs {
-		go runJob(ctx, log, job)
+	for i, job := range jobs {
+		// Stagger startup runs to avoid concurrent DB/CPU/network spikes on a
+		// small single-instance deployment.
+		delay := time.Duration(i) * 30 * time.Second
+		go runJob(ctx, log, job, delay)
 	}
 }
 
-// runJob drives one job: once at startup, then on a daily ticker.
+// runJob drives one job: once at startup (after an optional stagger delay),
+// then on a daily ticker.
 //
 // The first pass happens before the ticker starts because the C# services
 // execute their body first and delay afterwards, so a freshly deployed instance
 // prunes immediately. Ticking first would leave a day of growth sitting there
 // after every restart, which is the kind of difference nobody notices until a
 // retention window has been missed twice.
-func runJob(ctx context.Context, log Logger, job Job) {
+func runJob(ctx context.Context, log Logger, job Job, startupDelay time.Duration) {
+	if startupDelay > 0 {
+		timer := time.NewTimer(startupDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			log.Info("background job stopped", "job", job.Name)
+			return
+		case <-timer.C:
+		}
+	}
+
 	runSafely(ctx, log, job)
 
 	// A timer rather than a sleep-in-a-loop: this makes the interval explicit
