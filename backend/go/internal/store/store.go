@@ -42,6 +42,13 @@ type Config struct {
 	// MaxConnections caps the pool. It must stay well under the server's
 	// connection limit; on Supabase free that limit is around 15.
 	MaxConnections int32
+
+	// MaxConnLifetime is the maximum lifetime of a connection.
+	MaxConnLifetime time.Duration
+	// MaxConnIdleTime is the maximum idle time of a connection.
+	MaxConnIdleTime time.Duration
+	// HealthCheckPeriod is the interval for health checks.
+	HealthCheckPeriod time.Duration
 }
 
 // DB wraps a pgx connection pool.
@@ -63,6 +70,19 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		maxConns = 8
 	}
 
+	maxConnLifetime := cfg.MaxConnLifetime
+	if maxConnLifetime <= 0 {
+		maxConnLifetime = time.Hour
+	}
+	maxConnIdleTime := cfg.MaxConnIdleTime
+	if maxConnIdleTime <= 0 {
+		maxConnIdleTime = 30 * time.Minute
+	}
+	healthCheckPeriod := cfg.HealthCheckPeriod
+	if healthCheckPeriod <= 0 {
+		healthCheckPeriod = time.Minute
+	}
+
 	poolConfig, err := pgxpool.ParseConfig(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse database URL: %w", err)
@@ -72,9 +92,9 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	// Bound how long a request may wait for a pooled connection. Without this a
 	// traffic spike queues indefinitely and the request times out with no
 	// useful diagnostic.
-	poolConfig.MaxConnLifetime = time.Hour
-	poolConfig.MaxConnIdleTime = 30 * time.Minute
-	poolConfig.HealthCheckPeriod = time.Minute
+	poolConfig.MaxConnLifetime = maxConnLifetime
+	poolConfig.MaxConnIdleTime = maxConnIdleTime
+	poolConfig.HealthCheckPeriod = healthCheckPeriod
 
 	// Apply the protocol mode implied by the connection URL.
 	if UsesTransactionPooler(cfg.URL) {

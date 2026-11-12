@@ -104,8 +104,11 @@ func run() error {
 	defer cancelStartup()
 
 	db, err := store.Open(startupCtx, store.Config{
-		URL:            cfg.DatabaseURL,
-		MaxConnections: 8,
+		URL:               cfg.DatabaseURL,
+		MaxConnections:    cfg.DatabasePool.MaxConnections,
+		MaxConnLifetime:   cfg.DatabasePool.MaxConnLifetime,
+		MaxConnIdleTime:   cfg.DatabasePool.MaxConnIdleTime,
+		HealthCheckPeriod: cfg.DatabasePool.HealthCheckPeriod,
 	})
 	if err != nil {
 		return fmt.Errorf("connect to database: %w", err)
