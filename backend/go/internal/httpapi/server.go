@@ -44,6 +44,10 @@ type Server struct {
 	tokens  *auth.TokenIssuer
 	purger  *cdncache.Purger
 	prober  instances.Prober
+
+	// uploadSem bounds concurrent upload processing (decode/convert/dedupe/store)
+	// so a weak single instance fails fast instead of exhausting memory/CPU.
+	uploadSem chan struct{}
 }
 
 // NewServer builds a Server.
@@ -56,16 +60,17 @@ func NewServer(cfg *config.Config, db *store.DB, data *repo.Repo, log Logger, fi
 	discordClient *discord.Client, tokens *auth.TokenIssuer, purger *cdncache.Purger,
 	prober instances.Prober) *Server {
 	return &Server{
-		cfg:     cfg,
-		db:      db,
-		repo:    data,
-		log:     log,
-		authz:   authz.New(cfg),
-		storage: files,
-		discord: discordClient,
-		tokens:  tokens,
-		purger:  purger,
-		prober:  prober,
+		cfg:       cfg,
+		db:        db,
+		repo:      data,
+		log:       log,
+		authz:     authz.New(cfg),
+		storage:   files,
+		discord:   discordClient,
+		tokens:    tokens,
+		purger:    purger,
+		prober:    prober,
+		uploadSem: make(chan struct{}, 1),
 	}
 }
 

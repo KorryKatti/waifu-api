@@ -44,6 +44,17 @@ func (s *Server) handleUploadImage(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := s.principal(r)
 
+	// Minimal admission control: bound concurrent upload processing on this
+	// instance. Acquire after cheap checks so excess work is rejected quickly.
+	select {
+	case s.uploadSem <- struct{}{}:
+		defer func() { <-s.uploadSem }()
+	default:
+		w.Header().Set("Retry-After", "5")
+		apierror.New(http.StatusServiceUnavailable, "Service Unavailable", "The server is busy processing another upload. Please try again shortly.").Write(w, r.URL.Path)
+		return
+	}
+
 	// The body limit middleware already bounded the request, but the file part
 	// is read explicitly so an oversized upload is reported as a 413 rather
 	// than surfacing as a parse error.
