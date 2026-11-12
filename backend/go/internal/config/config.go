@@ -151,6 +151,9 @@ type Config struct {
 	// HTTP holds server timeout settings.
 	HTTP HTTPConfig
 
+	// Background controls periodic maintenance scheduling.
+	Background BackgroundConfig
+
 	// Review controls the content moderation pipeline.
 	Review ReviewConfig
 
@@ -294,6 +297,14 @@ type HTTPConfig struct {
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
+}
+
+// BackgroundConfig controls periodic maintenance scheduling.
+//
+// Defaults preserve the previous behavior (24h interval, 30s startup stagger).
+type BackgroundConfig struct {
+	Interval       time.Duration
+	StartupStagger time.Duration
 }
 
 // ImageConfig carries the upload validation limits.
@@ -560,6 +571,10 @@ func Load(l *Loader) (*Config, error) {
 	cfg.HTTP.ReadTimeout = l.optionalDurationOrAccumulate("HTTP__ReadTimeout", 60*time.Second, &missing)
 	cfg.HTTP.WriteTimeout = l.optionalDurationOrAccumulate("HTTP__WriteTimeout", 60*time.Second, &missing)
 	cfg.HTTP.IdleTimeout = l.optionalDurationOrAccumulate("HTTP__IdleTimeout", 120*time.Second, &missing)
+
+	// Background maintenance scheduling.
+	cfg.Background.Interval = l.optionalDurationOrAccumulate("Background__CleanupInterval", 24*time.Hour, &missing)
+	cfg.Background.StartupStagger = l.optionalDurationOrAccumulate("Background__StartupStagger", 30*time.Second, &missing)
 
 	// Review switches. These are required because the C# service treats them
 	// as mandatory and fails to boot without them; keeping them required here

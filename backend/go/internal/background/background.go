@@ -23,13 +23,6 @@ import (
 	"waifuapi/internal/repo"
 )
 
-// Interval between cleanup runs.
-//
-// The C# service uses 24 hours for both jobs and the retention windows are
-// measured in months, so an hourly tick would delete nothing extra while costing
-// a database round trip every hour forever.
-const cleanupInterval = 24 * time.Hour
-
 // Logger is the small logging surface these jobs need.
 type Logger interface {
 	Info(msg string, args ...any)
@@ -47,30 +40,57 @@ type Job struct {
 	Run func(ctx context.Context) error
 }
 
-// Start runs every job on a daily ticker until ctx is cancelled.
+// Config controls periodic maintenance scheduling.
+type Config struct {
+	// Interval is the time between runs after the initial startup pass.
+	// Defaults to 24h.
+	Interval time.Duration
+	// StartupStagger is the delay added between each job's initial run.
+	// Defaults to 30s.
+	StartupStagger time.Duration
+}
+
+func (c Config) withDefaults() Config {
+	if c.Interval <= 0 {
+		c.Interval = 24 * time.Hour
+	}
+	if c.StartupStagger < 0 {
+		c.StartupStagger = 0
+	}
+	if c.StartupStagger == 0 {
+		c.StartupStagger = 30 * time.Second
+	}
+	return c
+}
+
+// Start runs every job on a periodic ticker until ctx is cancelled.
 //
 // It returns immediately: the caller is a server that must keep serving, and a
 // failing cleanup must never prevent startup or shutdown. Every error is logged
 // and the loop continues, because a transient database problem at 3am must not
 // permanently disable cleanup.
-func Start(ctx context.Context, log Logger, jobs ...Job) {
+func Start(ctx context.Context, log Logger, cfg Config, jobs ...Job) {
+	cfg = cfg.withDefaults()
 	for i, job := range jobs {
 		// Stagger startup runs to avoid concurrent DB/CPU/network spikes on a
 		// small single-instance deployment.
-		delay := time.Duration(i) * 30 * time.Second
-		go runJob(ctx, log, job, delay)
+		delay := time.Duration(i) * cfg.StartupStagger
+		go runJob(ctx, log, job, delay, cfg.Interval)
 	}
 }
 
 // runJob drives one job: once at startup (after an optional stagger delay),
-// then on a daily ticker.
+// then on a periodic ticker.
 //
 // The first pass happens before the ticker starts because the C# services
 // execute their body first and delay afterwards, so a freshly deployed instance
 // prunes immediately. Ticking first would leave a day of growth sitting there
 // after every restart, which is the kind of difference nobody notices until a
 // retention window has been missed twice.
-func runJob(ctx context.Context, log Logger, job Job, startupDelay time.Duration) {
+func runJob(ctx context.Context, log Logger, job Job, startupDelay, interval time.Duration) {
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
 	if startupDelay > 0 {
 		timer := time.NewTimer(startupDelay)
 		select {
@@ -88,7 +108,7 @@ func runJob(ctx context.Context, log Logger, job Job, startupDelay time.Duration
 
 	// A timer rather than a sleep-in-a-loop: this makes the interval explicit
 	// and lets the select notice cancellation without waiting out the tick.
-	ticker := time.NewTicker(cleanupInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

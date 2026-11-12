@@ -204,7 +204,10 @@ func run() error {
 	// no longer in it, and it deletes nothing.
 	jobs = append(jobs, background.InstanceProbe(data, prober, backgroundLogger{log}))
 
-	background.Start(context.Background(), backgroundLogger{log}, jobs...)
+	background.Start(context.Background(), backgroundLogger{log}, background.Config{
+		Interval:       cfg.Background.Interval,
+		StartupStagger: cfg.Background.StartupStagger,
+	}, jobs...)
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
