@@ -210,12 +210,12 @@ func run() error {
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
 		Handler: handler,
 
-		// Generous timeouts. They exist to shed genuinely stuck connections,
-		// not to cut off slow-but-progressing work.
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// Generous timeouts by default. They exist to shed genuinely stuck
+		// connections, not to cut off slow-but-progressing work.
+		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
+		ReadTimeout:       cfg.HTTP.ReadTimeout,
+		WriteTimeout:      cfg.HTTP.WriteTimeout,
+		IdleTimeout:       cfg.HTTP.IdleTimeout,
 	}
 
 	// ---- Serve ---------------------------------------------------------

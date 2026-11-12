@@ -148,6 +148,9 @@ type Config struct {
 	// DatabasePool controls the Postgres connection pool.
 	DatabasePool DatabasePoolConfig
 
+	// HTTP holds server timeout settings.
+	HTTP HTTPConfig
+
 	// Review controls the content moderation pipeline.
 	Review ReviewConfig
 
@@ -281,6 +284,16 @@ type DatabasePoolConfig struct {
 	MaxConnIdleTime time.Duration
 	// HealthCheckPeriod is the interval for health checks. Defaults to 1m.
 	HealthCheckPeriod time.Duration
+}
+
+// HTTPConfig controls HTTP server timeouts.
+//
+// Defaults preserve the previous hardcoded behavior.
+type HTTPConfig struct {
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
 }
 
 // ImageConfig carries the upload validation limits.
@@ -541,6 +554,12 @@ func Load(l *Loader) (*Config, error) {
 	cfg.DatabasePool.MaxConnLifetime = l.optionalDurationOrAccumulate("Database__MaxConnLifetime", time.Hour, &missing)
 	cfg.DatabasePool.MaxConnIdleTime = l.optionalDurationOrAccumulate("Database__MaxConnIdleTime", 30*time.Minute, &missing)
 	cfg.DatabasePool.HealthCheckPeriod = l.optionalDurationOrAccumulate("Database__HealthCheckPeriod", time.Minute, &missing)
+
+	// HTTP server timeouts: optional, defaults preserve previous hardcoded behavior.
+	cfg.HTTP.ReadHeaderTimeout = l.optionalDurationOrAccumulate("HTTP__ReadHeaderTimeout", 10*time.Second, &missing)
+	cfg.HTTP.ReadTimeout = l.optionalDurationOrAccumulate("HTTP__ReadTimeout", 60*time.Second, &missing)
+	cfg.HTTP.WriteTimeout = l.optionalDurationOrAccumulate("HTTP__WriteTimeout", 60*time.Second, &missing)
+	cfg.HTTP.IdleTimeout = l.optionalDurationOrAccumulate("HTTP__IdleTimeout", 120*time.Second, &missing)
 
 	// Review switches. These are required because the C# service treats them
 	// as mandatory and fails to boot without them; keeping them required here
