@@ -35,12 +35,10 @@ func parseWaifuQuery(args string, nsfwAllowed bool) (url.Values, error) {
 	}
 
 	params := url.Values{}
-	switch {
-	case wantedNSFW:
+	if wantedNSFW || nsfwAllowed {
+		// In an NSFW channel `w!waifu` is NSFW-only, never `all`.
 		params.Set("isNsfw", "True")
-	case nsfwAllowed:
-		params.Set("isNsfw", "all")
-	default:
+	} else {
 		params.Set("isNsfw", "False")
 	}
 	params.Set("isAnimated", "All")
@@ -64,6 +62,11 @@ func parseWaifuQuery(args string, nsfwAllowed bool) (url.Values, error) {
 
 	params.Set("orderBy", "Random")
 	params.Set("pageSize", "1")
+	// Bust the CDN cache: `waifu-cdn` caches GETs by full URL for
+	// `max-age=60`, so the identical bare-`w!waifu` URL would otherwise
+	// replay the same random roll until it expires. A unique nonce per
+	// call gives every request a fresh cache key; the API ignores it.
+	params.Set("nonce", fmt.Sprintf("%d", time.Now().UnixNano()))
 	return params, nil
 }
 

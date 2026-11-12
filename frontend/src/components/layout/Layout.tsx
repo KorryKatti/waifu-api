@@ -2,9 +2,9 @@
 import { useTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
 import {
-    Sun, Moon, Menu, X, LogOut, Upload as UploadIcon,
-    Home, Image as ImageIcon, Tag as TagIcon, ChevronRight, PanelLeft,
-    User as UserIcon, Library, ChevronDown, Palette, Key, Users as UsersIcon, Flag, BarChart, Monitor, Book, Mail, Activity, HardDrive, Github, FileText, GitPullRequest, Megaphone, Server
+  Sun, Moon, Menu, X, LogOut, Upload as UploadIcon,
+  Home, Image as ImageIcon, Tag as TagIcon, ChevronDown,
+  User as UserIcon, Library, Palette, Key, Users as UsersIcon, Flag, BarChart, Monitor, Book, Mail, Activity, HardDrive, Github, FileText, GitPullRequest, Megaphone, Server, Route as RouteIcon
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -17,428 +17,233 @@ import { usePermissions } from '../../hooks/useBanner';
 import SiteBanner from '../SiteBanner';
 
 const Layout = () => {
-    const { theme, setTheme, resolvedTheme } = useTheme();
-    const { user, logout } = useAuth();
-    const location = useLocation();
+  const { theme, setTheme, resolvedTheme } = useTheme();
+  const { user, logout } = useAuth();
+  const location = useLocation();
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-    const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-    const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const { pendingCount, reportCount } = useNavBadges();
+  const queryClient = useQueryClient();
+  useEffect(() => { invalidateNavBadges(queryClient); }, [location.pathname, queryClient]);
 
-    // Nav count badges (pending submissions + unresolved reports). Both endpoints auto-scope: mods get the
-    // global queue counts, regular users get their own. React-query backed, so they refetch on navigation
-    // (invalidated below on route change) and immediately after actions like approve/resolve (handlers call
-    // invalidateNavBadges).
-    const { pendingCount, reportCount } = useNavBadges();
-    const queryClient = useQueryClient();
-    useEffect(() => { invalidateNavBadges(queryClient); }, [location.pathname, queryClient]);
+  const navBadge = pendingCount > 0 ? (
+    <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-primary text-primary-foreground">
+      {pendingCount > 99 ? '99+' : pendingCount}
+    </span>
+  ) : null;
 
-    const navBadge = pendingCount > 0 ? (
-        <span className="ml-auto px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none bg-primary text-primary-foreground">
-            {pendingCount > 99 ? '99+' : pendingCount}
-        </span>
-    ) : null;
+  const reportBadge = reportCount > 0 ? (
+    <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold leading-none bg-red-600 text-white">
+      {reportCount > 99 ? '99+' : reportCount}
+    </span>
+  ) : null;
 
-    const reportBadge = reportCount > 0 ? (
-        <span className="ml-auto px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none bg-red-500 text-white">
-            {reportCount > 99 ? '99+' : reportCount}
-        </span>
-    ) : null;
+  const isActive = (path: string) => location.pathname === path;
 
-    const isActive = (path: string) => location.pathname === path;
+  const handleLogout = () => {
+    logout();
+    window.location.href = '/';
+  };
 
-    const handleLogout = () => {
-        logout();
-        window.location.href = "/";
-    };
+  const appTitle = getEnv('VITE_APP_TITLE') || 'Waifu API';
+  const docsUrl = getEnv('VITE_DOCS_URL');
+  const contactEmail = getEnv('VITE_CONTACT_EMAIL');
+  const discordServerUrl = getEnv('VITE_DISCORD_SERVER_URL');
+  const statusUrl = getEnv('VITE_STATUS_URL');
+  const githubUrl = getEnv('VITE_GITHUB_URL');
+  const tosUrl = getEnv('VITE_TOS_URL');
+  const showContact = !!contactEmail || !!discordServerUrl;
 
-    const appTitle = getEnv('VITE_APP_TITLE') || 'Waifu API';
-    const docsUrl = getEnv('VITE_DOCS_URL');
-    const contactEmail = getEnv('VITE_CONTACT_EMAIL');
-    const discordServerUrl = getEnv('VITE_DISCORD_SERVER_URL');
-    const statusUrl = getEnv('VITE_STATUS_URL');
-    const githubUrl = getEnv('VITE_GITHUB_URL');
-    const tosUrl = getEnv('VITE_TOS_URL');
-    const showContact = !!contactEmail || !!discordServerUrl;
+  const navItems = [
+    { name: 'Home', path: '/', icon: Home },
+    { name: 'Posts', path: '/gallery', icon: ImageIcon },
+    { name: 'Albums', path: '/albums', icon: Library },
+    { name: 'Tags', path: '/tags', icon: TagIcon },
+    { name: 'Artists', path: '/artists', icon: Palette },
+  ];
 
-    const navItems = [
-        { name: 'Home', path: '/', icon: Home },
-        { name: 'Gallery', path: '/gallery', icon: ImageIcon },
-        { name: 'Albums', path: '/albums', icon: Library },
-        { name: 'Tags', path: '/tags', icon: TagIcon },
-        { name: 'Artists', path: '/artists', icon: Palette },
-    ];
+  const isModOrAdmin = user && (user.role === Role.Moderator || user.role === Role.Admin);
+  const isAdmin = user && user.role === Role.Admin;
+  const { canManageBanner } = usePermissions();
 
-    const isModOrAdmin = user && (user.role === Role.Moderator || user.role === Role.Admin);
-    const isAdmin = user && user.role === Role.Admin;
-    // Banner management role is configured (and enforced) by the backend, Moderator+ by default.
-    const { canManageBanner } = usePermissions();
+  const linkClass = (active: boolean) =>
+    `inline-flex items-center gap-1.5 px-2 py-1 text-sm border-b-2 transition-colors ${
+      active
+        ? 'border-primary text-foreground font-semibold'
+        : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
+    }`;
 
-    return (
-        <div className="min-h-screen bg-background text-foreground flex flex-col">
-            <GlobalErrorHandler />
+  return (
+    <div className="min-h-screen bg-background text-foreground flex flex-col">
+      <GlobalErrorHandler />
 
-            {/* 1. TOP NAVBAR */}
-            <header className="sticky top-0 z-50 w-full h-16 border-b border-border bg-card/95 backdrop-blur flex items-center justify-between px-4 lg:px-6 shadow-sm">
-                <div className="flex items-center gap-4">
-                    <button
-                        className="lg:hidden p-2 rounded-md hover:bg-secondary"
-                        onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-                    >
-                        <Menu size={24} />
-                    </button>
+      <header className="sticky top-0 z-50 w-full border-b border-border bg-card">
+        <div className="px-3 lg:px-4 h-12 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              className="lg:hidden p-1.5 rounded hover:bg-secondary"
+              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              aria-label="Menu"
+            >
+              <Menu size={20} />
+            </button>
 
-                    <Link to="/" className="flex items-center gap-2 group">
-                        <img src="/favicon.png" alt="Logo" className="w-8 h-8 rounded-lg shadow-lg group-hover:scale-105 transition-transform" />
-                        <span className="text-xl font-bold tracking-tight hidden sm:block">{appTitle}</span>
-                    </Link>
-                </div>
+            <Link to="/" className="flex items-center gap-2 min-w-0">
+              <img src="/favicon.png" alt="Logo" className="w-6 h-6 rounded-sm" />
+              <span className="text-base font-bold tracking-tight truncate">{appTitle}</span>
+            </Link>
 
-                <div className="flex items-center gap-2 sm:gap-4">
-                    {/* Theme Toggle Dropdown */}
-                    <Dropdown
-                        width="w-36"
-                        trigger={
-                            <button className="p-2.5 rounded-full hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors">
-                                {resolvedTheme === 'light' ? <Sun size={20} /> : <Moon size={20} />}
-                            </button>
-                        }
-                    >
-                        <DropdownItem onClick={() => setTheme('light')} active={theme === 'light'} icon={<Sun size={16} />}>Light</DropdownItem>
-                        <DropdownItem onClick={() => setTheme('dark')} active={theme === 'dark'} icon={<Moon size={16} />}>Dark</DropdownItem>
-                        <DropdownItem onClick={() => setTheme('system')} active={theme === 'system'} icon={<Monitor size={16} />}>System</DropdownItem>
-                    </Dropdown>
+            <nav className="hidden lg:flex items-center gap-1 ml-2">
+              {navItems.map((item) => (
+                <Link key={item.path} to={item.path} className={linkClass(isActive(item.path))}>
+                  {item.name}
+                </Link>
+              ))}
+              <Link to="/upload" className={linkClass(isActive('/upload'))}>
+                <UploadIcon size={14} /> Upload
+              </Link>
+            </nav>
+          </div>
 
-                    {user ? (
-                        <Dropdown
-                            width="w-64"
-                            padding="p-0"
-                            trigger={
-                                <button className="flex items-center gap-3 pl-2 pr-3 py-1.5 rounded-full hover:bg-secondary transition-colors border border-transparent hover:border-border max-w-[200px]">
-                                    {user.avatarUrl ? (
-                                        <img src={user.avatarUrl} alt={user.name} className="w-8 h-8 shrink-0 rounded-full object-cover border border-primary/20" />
-                                    ) : (
-                                        <div className="w-8 h-8 shrink-0 rounded-full bg-primary/10 flex items-center justify-center text-primary border border-primary/20">
-                                            <UserIcon size={16} />
-                                        </div>
-                                    )}
-                                    <div className="text-right hidden md:block overflow-hidden">
-                                        <p className="text-xs font-bold leading-none truncate max-w-[100px]">{user.name}</p>
-                                        <p className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide font-semibold">
-                                            {user.role === Role.Admin ? 'Admin' : user.role === Role.Moderator ? 'Mod' : 'User'}
-                                        </p>
-                                    </div>
-                                    <ChevronDown size={14} className="text-muted-foreground shrink-0" />
-                                </button>
-                            }
-                        >
-                            {/* Header Mobile */}
-                            <div className="px-4 py-3 border-b border-border md:hidden bg-secondary/30">
-                                <p className="font-bold truncate">{user.name}</p>
-                                <p className="text-xs text-muted-foreground">{user.role === Role.Admin ? 'Administrator' : 'Member'}</p>
-                            </div>
+          <div className="flex items-center gap-1 sm:gap-2">
+            <Dropdown
+              width="w-36"
+              trigger={
+                <button className="p-1.5 rounded hover:bg-secondary text-muted-foreground hover:text-foreground" title="Theme">
+                  {resolvedTheme === 'light' ? <Sun size={18} /> : <Moon size={18} />}
+                </button>
+              }
+            >
+              <DropdownItem onClick={() => setTheme('light')} active={theme === 'light'} icon={<Sun size={16} />}>Light</DropdownItem>
+              <DropdownItem onClick={() => setTheme('dark')} active={theme === 'dark'} icon={<Moon size={16} />}>Dark</DropdownItem>
+              <DropdownItem onClick={() => setTheme('system')} active={theme === 'system'} icon={<Monitor size={16} />}>System</DropdownItem>
+            </Dropdown>
 
-                            <div className="p-1">
-                                <DropdownLabel>Personal</DropdownLabel>
-                                <Link to="/upload"><DropdownItem icon={<UploadIcon size={16} />}>Upload Image</DropdownItem></Link>
-                                <Link to="/albums"><DropdownItem icon={<Library size={16} />}>My Albums</DropdownItem></Link>
-                                <Link to="/api-keys"><DropdownItem icon={<Key size={16} />}>API Keys</DropdownItem></Link>
-                                {!isModOrAdmin && (
-                                    <>
-                                        <Link to="/review"><DropdownItem icon={<GitPullRequest size={16} />}>My Submissions{navBadge}</DropdownItem></Link>
-                                        <Link to="/my-reports"><DropdownItem icon={<Flag size={16} />}>My Reports</DropdownItem></Link>
-                                    </>
-                                )}
-
-                                {(isModOrAdmin || canManageBanner) && (
-                                    <>
-                                        <DropdownSeparator />
-                                        <DropdownLabel>Administration</DropdownLabel>
-                                        {canManageBanner && (
-                                            <Link to="/site-banner"><DropdownItem icon={<Megaphone size={16} className="text-primary" />}>Site Banner</DropdownItem></Link>
-                                        )}
-                                        {isModOrAdmin && (
-                                            <>
-                                                <Link to="/review"><DropdownItem icon={<GitPullRequest size={16} className="text-orange-500" />}>Review{navBadge}</DropdownItem></Link>
-                                                <Link to="/reports"><DropdownItem icon={<Flag size={16} className="text-red-500" />}>Reports{reportBadge}</DropdownItem></Link>
-                                            </>
-                                        )}
-                                        {isAdmin && (
-                                            <>
-                                                <Link to="/users"><DropdownItem icon={<UsersIcon size={16} className="text-blue-500" />}>User Management</DropdownItem></Link>
-                                                <Link to="/stats"><DropdownItem icon={<BarChart size={16} className="text-purple-500" />}>Statistics</DropdownItem></Link>
-                                                <Link to="/storage-diff"><DropdownItem icon={<HardDrive size={16} className="text-emerald-500" />}>Storage Diff</DropdownItem></Link>
-                                            </>
-                                        )}
-                                    </>
-                                )}
-
-                                <DropdownSeparator />
-                                <DropdownItem onClick={handleLogout} icon={<LogOut size={16} />} danger>Log out</DropdownItem>
-                            </div>
-                        </Dropdown>
+            {user ? (
+              <Dropdown
+                width="w-64"
+                padding="p-0"
+                trigger={
+                  <button className="flex items-center gap-2 pl-1 pr-2 py-1 rounded hover:bg-secondary border border-transparent hover:border-border max-w-[220px]">
+                    {user.avatarUrl ? (
+                      <img src={user.avatarUrl} alt={user.name} className="w-6 h-6 shrink-0 rounded object-cover border border-border" />
                     ) : (
-                        <Link
-                            to="/login"
-                            className="px-5 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-bold hover:opacity-90 transition-all shadow-sm"
-                        >
-                            Login
-                        </Link>
+                      <div className="w-6 h-6 shrink-0 rounded bg-secondary flex items-center justify-center text-muted-foreground border border-border">
+                        <UserIcon size={14} />
+                      </div>
                     )}
+                    <span className="text-sm font-medium truncate max-w-[120px] hidden sm:block">{user.name}</span>
+                    <ChevronDown size={14} className="text-muted-foreground shrink-0" />
+                  </button>
+                }
+              >
+                <div className="px-3 py-2 border-b border-border bg-secondary/30">
+                  <p className="font-semibold truncate text-sm">{user.name}</p>
+                  <p className="text-xs text-muted-foreground">{user.role === Role.Admin ? 'Administrator' : user.role === Role.Moderator ? 'Moderator' : 'Member'}</p>
                 </div>
-            </header>
-
-            {/* 2. MAIN LAYOUT */}
-            <div className="flex flex-1 overflow-hidden relative">
-
-                {/* DESKTOP SIDEBAR - Cleaned up */}
-                <aside
-                    className={`hidden lg:flex flex-col border-r border-border bg-card transition-all duration-300 ease-in-out ${
-                        isSidebarCollapsed ? 'w-20' : 'w-64'
-                    }`}
-                >
-                    <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
-                        {navItems.map((item) => (
-                            <Link
-                                key={item.path}
-                                to={item.path}
-                                className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all group relative overflow-hidden ${
-                                    isActive(item.path)
-                                        ? 'bg-primary text-primary-foreground font-bold shadow-md'
-                                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                                } ${isSidebarCollapsed ? 'justify-center' : ''}`}
-                                title={isSidebarCollapsed ? item.name : ''}
-                            >
-                                <item.icon size={22} className="relative z-10 shrink-0" />
-                                {!isSidebarCollapsed && <span className="relative z-10 whitespace-nowrap">{item.name}</span>}
-                            </Link>
-                        ))}
-
-                        <div className="my-4 border-t border-border mx-2 opacity-50"></div>
-
-                        <Link
-                            to="/upload"
-                            className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all ${
-                                isActive('/upload')
-                                    ? 'bg-secondary text-foreground font-bold'
-                                    : 'bg-secondary/30 text-foreground hover:bg-secondary font-medium'
-                            } ${isSidebarCollapsed ? 'justify-center' : ''}`}
-                        >
-                            <UploadIcon size={22} className="shrink-0" />
-                            {!isSidebarCollapsed && <span>Upload</span>}
-                        </Link>
-
-                        {/* Dynamic Links Section */}
-                        {(docsUrl || showContact || statusUrl || githubUrl || tosUrl) && (
-                            <>
-                                <div className="my-4 border-t border-border mx-2 opacity-50"></div>
-
-                                {docsUrl && (
-                                    <a
-                                        href={docsUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all text-muted-foreground hover:bg-secondary hover:text-foreground ${isSidebarCollapsed ? 'justify-center' : ''}`}
-                                        title={isSidebarCollapsed ? 'Documentation' : ''}
-                                    >
-                                        <Book size={22} className="shrink-0" />
-                                        {!isSidebarCollapsed && <span>Documentation</span>}
-                                    </a>
-                                )}
-
-                                {githubUrl && (
-                                    <a
-                                        href={githubUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all text-muted-foreground hover:bg-secondary hover:text-foreground ${isSidebarCollapsed ? 'justify-center' : ''}`}
-                                        title={isSidebarCollapsed ? 'GitHub' : ''}
-                                    >
-                                        <Github size={22} className="shrink-0" />
-                                        {!isSidebarCollapsed && <span>GitHub</span>}
-                                    </a>
-                                )}
-
-                                {statusUrl && (
-                                    <a
-                                        href={statusUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all text-muted-foreground hover:bg-secondary hover:text-foreground ${isSidebarCollapsed ? 'justify-center' : ''}`}
-                                        title={isSidebarCollapsed ? 'Status' : ''}
-                                    >
-                                        <Activity size={22} className="shrink-0" />
-                                        {!isSidebarCollapsed && <span>Status</span>}
-                                    </a>
-                                )}
-
-                                {tosUrl && (
-                                    <a
-                                        href={tosUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all text-muted-foreground hover:bg-secondary hover:text-foreground ${isSidebarCollapsed ? 'justify-center' : ''}`}
-                                        title={isSidebarCollapsed ? 'Terms of Service' : ''}
-                                    >
-                                        <FileText size={22} className="shrink-0" />
-                                        {!isSidebarCollapsed && <span>Terms of Service</span>}
-                                    </a>
-                                )}
-
-                                {/* Always shown, unlike the links above it: the index is
-                                    the feature that makes self-hosting findable, and
-                                    hiding it behind a configuration flag would mean the
-                                    one page a new operator needs is the one page that
-                                    can be absent. */}
-                                <Link
-                                    to="/instances"
-                                    className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all ${
-                                        isActive('/instances')
-                                            ? 'bg-secondary text-foreground font-bold'
-                                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                                    } ${isSidebarCollapsed ? 'justify-center' : ''}`}
-                                    title={isSidebarCollapsed ? 'Instances' : ''}
-                                >
-                                    <Server size={22} className="shrink-0" />
-                                    {!isSidebarCollapsed && <span>Instances</span>}
-                                </Link>
-
-                                {showContact && (
-                                    <Link
-                                        to="/contact"
-                                        className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all ${
-                                            isActive('/contact')
-                                                ? 'bg-secondary text-foreground font-bold'
-                                                : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                                        } ${isSidebarCollapsed ? 'justify-center' : ''}`}
-                                        title={isSidebarCollapsed ? 'Contact' : ''}
-                                    >
-                                        <Mail size={22} className="shrink-0" />
-                                        {!isSidebarCollapsed && <span>Contact</span>}
-                                    </Link>
-                                )}
-                            </>
-                        )}
-                    </nav>
-
-                    <div className="p-4 border-t border-border mt-auto">
-                        <button
-                            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-                            className="w-full flex items-center justify-center p-2 rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
-                        >
-                            {isSidebarCollapsed ? <ChevronRight size={20} /> : <PanelLeft size={20} />}
-                        </button>
-                    </div>
-                </aside>
-
-                {/* MOBILE DRAWER */}
-                {isMobileMenuOpen && (
-                    <div className="fixed inset-0 z-50 lg:hidden">
-                        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setIsMobileMenuOpen(false)} />
-                        <div className="absolute inset-y-0 left-0 w-full sm:w-80 bg-background border-r border-border shadow-2xl flex flex-col p-4 animate-in slide-in-from-left">
-                            <div className="flex justify-between items-center mb-8">
-                                <span className="font-bold text-xl">Menu</span>
-                                <button onClick={() => setIsMobileMenuOpen(false)} className="p-2 hover:bg-secondary rounded-lg"><X size={24} /></button>
-                            </div>
-                            <nav className="space-y-2 flex-1 overflow-y-auto">
-                                {navItems.map((item) => (
-                                    <Link
-                                        key={item.path}
-                                        to={item.path}
-                                        onClick={() => setIsMobileMenuOpen(false)}
-                                        className={`flex items-center gap-3 px-4 py-3 rounded-xl font-medium ${
-                                            isActive(item.path) ? 'bg-secondary text-foreground' : 'text-muted-foreground'
-                                        }`}
-                                    >
-                                        <item.icon size={20} /> {item.name}
-                                    </Link>
-                                ))}
-
-                                <div className="my-2 border-t border-border opacity-50"></div>
-
-                                <Link
-                                    to="/upload"
-                                    onClick={() => setIsMobileMenuOpen(false)}
-                                    className={`flex items-center gap-3 px-4 py-3 rounded-xl font-medium ${
-                                        isActive('/upload') ? 'bg-secondary text-foreground' : 'text-muted-foreground'
-                                    }`}
-                                >
-                                    <UploadIcon size={20} /> Upload
-                                </Link>
-
-                                {(docsUrl || showContact || statusUrl || githubUrl || tosUrl) && (
-                                    <>
-                                        <div className="my-2 border-t border-border opacity-50"></div>
-
-                                        {docsUrl && (
-                                            <a
-                                                href={docsUrl}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-muted-foreground hover:bg-secondary hover:text-foreground"
-                                            >
-                                                <Book size={20} /> Documentation
-                                            </a>
-                                        )}
-
-                                        {githubUrl && (
-                                            <a
-                                                href={githubUrl}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-muted-foreground hover:bg-secondary hover:text-foreground"
-                                            >
-                                                <Github size={20} /> GitHub
-                                            </a>
-                                        )}
-
-                                        {statusUrl && (
-                                            <a
-                                                href={statusUrl}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-muted-foreground hover:bg-secondary hover:text-foreground"
-                                            >
-                                                <Activity size={20} /> Status
-                                            </a>
-                                        )}
-
-                                        {tosUrl && (
-                                            <a
-                                                href={tosUrl}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-muted-foreground hover:bg-secondary hover:text-foreground"
-                                            >
-                                                <FileText size={20} /> Terms of Service
-                                            </a>
-                                        )}
-
-                                        {showContact && (
-                                            <Link
-                                                to="/contact"
-                                                onClick={() => setIsMobileMenuOpen(false)}
-                                                className={`flex items-center gap-3 px-4 py-3 rounded-xl font-medium ${
-                                                    isActive('/contact') ? 'bg-secondary text-foreground' : 'text-muted-foreground'
-                                                }`}
-                                            >
-                                                <Mail size={20} /> Contact
-                                            </Link>
-                                        )}
-                                    </>
-                                )}
-                            </nav>
-                        </div>
-                    </div>
-                )}
-
-                {/* CONTENT AREA */}
-                <main className="flex-1 overflow-x-hidden overflow-y-auto bg-muted/20 h-[calc(100vh-4rem)] relative">
-                    <SiteBanner />
-                    <Outlet />
-                </main>
-            </div>
+                <div className="p-1">
+                  <DropdownLabel>Personal</DropdownLabel>
+                  <Link to="/upload"><DropdownItem icon={<UploadIcon size={16} />}>Upload Image</DropdownItem></Link>
+                  <Link to="/albums"><DropdownItem icon={<Library size={16} />}>My Albums</DropdownItem></Link>
+                  <Link to="/api-keys"><DropdownItem icon={<Key size={16} />}>API Keys</DropdownItem></Link>
+                  {!isModOrAdmin && (
+                    <>
+                      <Link to="/review"><DropdownItem icon={<GitPullRequest size={16} />}>My Submissions{navBadge}</DropdownItem></Link>
+                      <Link to="/my-reports"><DropdownItem icon={<Flag size={16} />}>My Reports</DropdownItem></Link>
+                    </>
+                  )}
+                  {(isModOrAdmin || canManageBanner) && (
+                    <>
+                      <DropdownSeparator />
+                      <DropdownLabel>Administration</DropdownLabel>
+                      {canManageBanner && (
+                        <Link to="/site-banner"><DropdownItem icon={<Megaphone size={16} className="text-primary" />}>Site Banner</DropdownItem></Link>
+                      )}
+                      {isModOrAdmin && (
+                        <>
+                          <Link to="/review"><DropdownItem icon={<GitPullRequest size={16} className="text-orange-500" />}>Review{navBadge}</DropdownItem></Link>
+                          <Link to="/reports"><DropdownItem icon={<Flag size={16} className="text-red-500" />}>Reports{reportBadge}</DropdownItem></Link>
+                        </>
+                      )}
+                      {isAdmin && (
+                        <>
+                          <Link to="/users"><DropdownItem icon={<UsersIcon size={16} className="text-blue-500" />}>User Management</DropdownItem></Link>
+                          <Link to="/stats"><DropdownItem icon={<BarChart size={16} className="text-purple-500" />}>Statistics</DropdownItem></Link>
+                          <Link to="/storage-diff"><DropdownItem icon={<HardDrive size={16} className="text-emerald-500" />}>Storage Diff</DropdownItem></Link>
+                        </>
+                      )}
+                    </>
+                  )}
+                  <DropdownSeparator />
+                  <DropdownItem onClick={handleLogout} icon={<LogOut size={16} />} danger>Log out</DropdownItem>
+                </div>
+              </Dropdown>
+            ) : (
+              <Link
+                to="/login"
+                className="px-3 py-1.5 rounded bg-primary text-primary-foreground text-sm font-semibold hover:opacity-90"
+              >
+                Login
+              </Link>
+            )}
+          </div>
         </div>
-    );
+
+        {/* Secondary links bar (booru-like utility row) */}
+        <div className="hidden sm:flex flex-wrap items-center gap-x-3 gap-y-1 px-3 lg:px-4 py-1 border-t border-border bg-secondary/30 text-xs">
+          {docsUrl && <a href={docsUrl} target="_blank" rel="noopener noreferrer" className="booru-link inline-flex items-center gap-1"><Book size={12} /> Docs</a>}
+          {githubUrl && <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="booru-link inline-flex items-center gap-1"><Github size={12} /> GitHub</a>}
+          {statusUrl && <a href={statusUrl} target="_blank" rel="noopener noreferrer" className="booru-link inline-flex items-center gap-1"><Activity size={12} /> Status</a>}
+          <Link to="/instances" className="booru-link inline-flex items-center gap-1"><Server size={12} /> Instances</Link>
+          <Link to="/router" className="booru-link inline-flex items-center gap-1"><RouteIcon size={12} /> Router</Link>
+          <Link to="/legal" className="booru-link inline-flex items-center gap-1"><FileText size={12} /> Legal</Link>
+          {showContact && <Link to="/contact" className="booru-link inline-flex items-center gap-1"><Mail size={12} /> Contact</Link>}
+          {tosUrl && <a href={tosUrl} target="_blank" rel="noopener noreferrer" className="booru-link inline-flex items-center gap-1"><FileText size={12} /> Terms</a>}
+        </div>
+      </header>
+
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 z-[60] lg:hidden">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setIsMobileMenuOpen(false)} />
+          <div className="absolute inset-y-0 left-0 w-full max-w-xs bg-card border-r border-border shadow-lg flex flex-col p-3">
+            <div className="flex justify-between items-center mb-4 pb-2 border-b border-border">
+              <span className="font-bold">Menu</span>
+              <button onClick={() => setIsMobileMenuOpen(false)} className="p-1.5 hover:bg-secondary rounded"><X size={20} /></button>
+            </div>
+            <nav className="space-y-1 flex-1 overflow-y-auto text-sm">
+              {navItems.map((item) => (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className={`flex items-center gap-2 px-2 py-2 rounded ${isActive(item.path) ? 'bg-secondary font-semibold' : 'hover:bg-secondary/60'}`}
+                >
+                  <item.icon size={16} /> {item.name}
+                </Link>
+              ))}
+              <Link to="/upload" onClick={() => setIsMobileMenuOpen(false)} className={`flex items-center gap-2 px-2 py-2 rounded ${isActive('/upload') ? 'bg-secondary font-semibold' : 'hover:bg-secondary/60'}`}>
+                <UploadIcon size={16} /> Upload
+              </Link>
+              <div className="my-2 border-t border-border" />
+              {docsUrl && <a href={docsUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-2 py-2 rounded hover:bg-secondary/60"><Book size={16} /> Documentation</a>}
+              {githubUrl && <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-2 py-2 rounded hover:bg-secondary/60"><Github size={16} /> GitHub</a>}
+              {statusUrl && <a href={statusUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-2 py-2 rounded hover:bg-secondary/60"><Activity size={16} /> Status</a>}
+              <Link to="/instances" onClick={() => setIsMobileMenuOpen(false)} className="flex items-center gap-2 px-2 py-2 rounded hover:bg-secondary/60"><Server size={16} /> Instances</Link>
+              <Link to="/router" onClick={() => setIsMobileMenuOpen(false)} className="flex items-center gap-2 px-2 py-2 rounded hover:bg-secondary/60"><RouteIcon size={16} /> Router</Link>
+              <Link to="/legal" onClick={() => setIsMobileMenuOpen(false)} className="flex items-center gap-2 px-2 py-2 rounded hover:bg-secondary/60"><FileText size={16} /> Legal</Link>
+              {showContact && <Link to="/contact" onClick={() => setIsMobileMenuOpen(false)} className="flex items-center gap-2 px-2 py-2 rounded hover:bg-secondary/60"><Mail size={16} /> Contact</Link>}
+              {tosUrl && <a href={tosUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-2 py-2 rounded hover:bg-secondary/60"><FileText size={16} /> Terms of Service</a>}
+            </nav>
+          </div>
+        </div>
+      )}
+
+      <main className="flex-1 relative">
+        <SiteBanner />
+        <Outlet />
+      </main>
+    </div>
+  );
 };
 
 export default Layout;

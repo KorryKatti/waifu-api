@@ -1,0 +1,29 @@
+services:
+  bot-fluxer:
+    build: .
+    image: waifu-bot-fluxer:latest
+    # gofluxer calls os.Exit(1) on a Fluxer 429, so the supervisor must
+    # restart the process. See "Rate limits" in README.md.
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # State files live on the volume below, not in the container layer.
+      BOT_STATE_DIR: /data
+    volumes:
+      - bot-fluxer-data:/data
+    # No ports: outbound-only bot (Fluxer gateway WebSocket + HTTPS APIs).
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+volumes:
+  bot-fluxer-data:

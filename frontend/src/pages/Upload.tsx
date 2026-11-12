@@ -96,6 +96,18 @@ const Upload = () => {
             <p className="text-sm text-muted-foreground mt-1">
               New uploads require review approval before appearing publicly.
             </p>
+            <p className="text-sm text-muted-foreground mt-1">
+              If an upload fails, try converting your image to WebP:{' '}
+              <a
+                href="https://cloudconvert.com/webp-converter"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 dark:text-blue-400 hover:underline font-medium"
+              >
+                cloudconvert.com/webp-converter
+              </a>
+              .
+            </p>
           </div>
         </div>
 

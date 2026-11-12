@@ -79,7 +79,8 @@ var commandList = []commandInfo{
 		Usage: "register <url> [name]",
 		Short: "List your own instance on the public index.",
 		Detail: "Registers the base URL of your waifu API instance. The API probes " +
-			"it before storing anything. One registration an hour across the whole server.",
+			"it before storing anything. One registration an hour across the whole server. " +
+			"Only usable in guild `1563189593090568192` — elsewhere it is disabled.",
 	},
 	{
 		Name:   "stats",

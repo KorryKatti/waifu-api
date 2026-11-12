@@ -137,3 +137,33 @@ func HammingDistance(a, b uint64) int {
 // DuplicateThreshold is the maximum Hamming distance at which an upload is
 // considered a duplicate.
 const DuplicateThreshold = 4
+
+// phash band widths. 5 bands guarantee (by pigeonhole principle) that any
+// pair within DuplicateThreshold (4) shares at least one identical band,
+// so an OR over equality on each indexed band returns a candidate superset.
+const (
+	phashBand1Bits = 13
+	phashBand2Bits = 13
+	phashBand3Bits = 13
+	phashBand4Bits = 13
+	phashBand5Bits = 12
+)
+
+// PhashBands splits a 64-bit perceptual hash into five fixed bands used for
+// indexed near-duplicate candidate lookup. The split is stable and must not
+// change without a backfill.
+func PhashBands(hash uint64) (b1, b2, b3, b4, b5 int64) {
+	shift := uint(0)
+	mask := func(bits uint) uint64 { return (uint64(1) << bits) - 1 }
+
+	b1 = int64((hash >> shift) & mask(phashBand1Bits))
+	shift += phashBand1Bits
+	b2 = int64((hash >> shift) & mask(phashBand2Bits))
+	shift += phashBand2Bits
+	b3 = int64((hash >> shift) & mask(phashBand3Bits))
+	shift += phashBand3Bits
+	b4 = int64((hash >> shift) & mask(phashBand4Bits))
+	shift += phashBand4Bits
+	b5 = int64((hash >> shift) & mask(phashBand5Bits))
+	return
+}

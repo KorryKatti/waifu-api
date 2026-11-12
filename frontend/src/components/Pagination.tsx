@@ -42,7 +42,7 @@ const Pagination = ({ currentPage, totalPages, setPage, disabled = false, pageSi
 
     if (disabled) {
         return (
-            <div className="flex justify-center py-6 text-muted-foreground text-sm italic">
+            <div className="flex justify-center py-4 text-muted-foreground text-sm">
                 Pagination disabled
             </div>
         );
@@ -59,7 +59,7 @@ const Pagination = ({ currentPage, totalPages, setPage, disabled = false, pageSi
         if (!isNaN(val) && val >= 1 && val <= totalPages) {
             changePage(val);
         } else {
-            setInputVal(currentPage.toString()); // Reset to current if invalid
+            setInputVal(currentPage.toString());
         }
     };
 
@@ -80,12 +80,10 @@ const Pagination = ({ currentPage, totalPages, setPage, disabled = false, pageSi
         }
     };
 
-    // Darker text color (text-foreground) for better visibility in light mode
-    const buttonClass = "p-2 rounded-md border border-border bg-card hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-foreground";
+    const buttonClass = "px-2 py-1 border border-border bg-card hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed text-foreground rounded-sm";
 
     return (
-        <div className="flex flex-wrap justify-center items-center gap-1.5 py-6 select-none">
-            {/* Page size input */}
+        <div className="flex flex-wrap justify-center items-center gap-1 py-4 select-none text-sm">
             {setPageSize && pageSize !== undefined && (
                 <div className="flex items-center gap-1.5 mr-2">
                     <input
@@ -94,40 +92,27 @@ const Pagination = ({ currentPage, totalPages, setPage, disabled = false, pageSi
                         onChange={(e) => setPageSizeInput(e.target.value)}
                         onBlur={handlePageSizeBlur}
                         onKeyDown={handlePageSizeKeyDown}
-                        className="w-12 py-1.5 text-center text-sm font-bold bg-secondary border border-transparent focus:border-primary rounded-md outline-none transition-all text-foreground"
+                        className="w-12 py-1 text-center bg-secondary border border-border focus:border-primary rounded-sm outline-none text-foreground"
                     />
-                    <span className="text-sm text-muted-foreground">/ page</span>
+                    <span className="text-muted-foreground">/ page</span>
                 </div>
             )}
 
             {totalPages > 1 && (
                 <>
-                    {/* First & Prev */}
-                    <button onClick={handleFirst} disabled={currentPage === 1} className={buttonClass} title="First Page">
-                        <ChevronsLeft size={18} />
-                    </button>
-                    <button onClick={handlePrev} disabled={currentPage === 1} className={buttonClass} title="Previous Page">
-                        <ChevronLeft size={18} />
-                    </button>
-
-                    {/* Page Input */}
-                    <form onSubmit={handleSubmit} className="flex items-center gap-2 mx-1">
+                    <button onClick={handleFirst} disabled={currentPage === 1} className={buttonClass} title="First Page"><ChevronsLeft size={16} /></button>
+                    <button onClick={handlePrev} disabled={currentPage === 1} className={buttonClass} title="Previous Page"><ChevronLeft size={16} /></button>
+                    <form onSubmit={handleSubmit} className="flex items-center gap-1 mx-1">
                         <input
                             type="text"
                             value={inputVal}
                             onChange={(e) => setInputVal(e.target.value)}
-                            className="w-12 py-1.5 text-center text-base font-bold bg-secondary border border-transparent focus:border-primary rounded-md outline-none transition-all text-foreground"
+                            className="w-12 py-1 text-center font-semibold bg-secondary border border-border focus:border-primary rounded-sm outline-none text-foreground"
                         />
-                        <span className="text-base font-bold text-foreground opacity-80">/ {totalPages}</span>
+                        <span className="text-foreground">/ {totalPages}</span>
                     </form>
-
-                    {/* Next & Last */}
-                    <button onClick={handleNext} disabled={currentPage === totalPages} className={buttonClass} title="Next Page">
-                        <ChevronRight size={18} />
-                    </button>
-                    <button onClick={handleLast} disabled={currentPage === totalPages} className={buttonClass} title="Last Page">
-                        <ChevronsRight size={18} />
-                    </button>
+                    <button onClick={handleNext} disabled={currentPage === totalPages} className={buttonClass} title="Next Page"><ChevronRight size={16} /></button>
+                    <button onClick={handleLast} disabled={currentPage === totalPages} className={buttonClass} title="Last Page"><ChevronsRight size={16} /></button>
                 </>
             )}
         </div>

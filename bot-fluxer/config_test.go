@@ -20,6 +20,39 @@ func TestRegisterTargetIsCDN(t *testing.T) {
 	}
 }
 
+func TestRegisterGuildAllowed(t *testing.T) {
+	cfg := loadConfig()
+	// Default: only the configured guild, never DMs or other guilds.
+	if !cfg.registerGuildAllowed("1563189593090568192") {
+		t.Fatal("default guild should be allowed")
+	}
+	for _, guild := range []string{"", "123", "1563189593090568193"} {
+		if cfg.registerGuildAllowed(guild) {
+			t.Errorf("guild %q should be denied", guild)
+		}
+	}
+
+	// A hand-built config with no allowlist also stays gated to the default.
+	if (&config{}).registerGuildAllowed("123") {
+		t.Error("empty allowlist should deny other guilds")
+	}
+
+	// REGISTER_GUILDS overrides the default.
+	t.Setenv("REGISTER_GUILDS", "111, 222")
+	cfg = loadConfig()
+	for _, guild := range []string{"111", "222"} {
+		if !cfg.registerGuildAllowed(guild) {
+			t.Errorf("guild %q should be allowed", guild)
+		}
+	}
+	if cfg.registerGuildAllowed("1563189593090568192") {
+		t.Error("default guild should be denied once REGISTER_GUILDS is set")
+	}
+	if got := cfg.registerGuildList(); len(got) != 2 || got[0] != "111" || got[1] != "222" {
+		t.Errorf("registerGuildList() = %v, want [111 222]", got)
+	}
+}
+
 func TestLoadConfigRequiresExplicitRegisterHost(t *testing.T) {
 	t.Setenv("WAIFU_API", "https://cdn.example")
 	t.Setenv("WAIFU_ORIGIN", "")
@@ -58,13 +91,30 @@ func TestParseWaifuQueryFlagsAndTags(t *testing.T) {
 	}
 }
 
-func TestParseWaifuQueryUsesAllInNSFWChannel(t *testing.T) {
+func TestParseWaifuQueryUsesTrueInNSFWChannel(t *testing.T) {
 	params, err := parseWaifuQuery("maid", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := params.Get("isNsfw"); got != "all" {
-		t.Errorf("isNsfw = %q, want all", got)
+	if got := params.Get("isNsfw"); got != "True" {
+		t.Errorf("isNsfw = %q, want True (NSFW-only in NSFW channel, not all)", got)
+	}
+}
+
+func TestParseWaifuQueryNonceIsUniquePerCall(t *testing.T) {
+	first, err := parseWaifuQuery("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := parseWaifuQuery("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Get("nonce") == "" || second.Get("nonce") == "" {
+		t.Fatal("nonce must be set on every waifu query")
+	}
+	if first.Get("nonce") == second.Get("nonce") {
+		t.Error("nonce must differ per call, otherwise the CDN cache key repeats")
 	}
 }
 

@@ -271,6 +271,7 @@ func (s *Server) applyImageUpdate(ctx context.Context, id int64, fields imageUpd
 		// the hash is converted rather than interpolated. Passing the
 		// imageproc hex form directly is the error
 		// `"D" is not a valid binary digit`.
+		hash := parseHashString(metadata.PerceptualHash)
 		if _, err := tx.Exec(ctx, `
             UPDATE "Images"
             SET "Width" = $1, "Height" = $2, "ByteSize" = $3,
@@ -279,8 +280,11 @@ func (s *Server) applyImageUpdate(ctx context.Context, id int64, fields imageUpd
             WHERE "Id" = $7`,
 			metadata.Width, metadata.Height, metadata.ByteSize,
 			metadata.DominantColor, metadata.IsAnimated,
-			models.PerceptualHashToBitString(parseHashString(metadata.PerceptualHash)), id); err != nil {
+			models.PerceptualHashToBitString(hash), id); err != nil {
 			return fmt.Errorf("update replacement metadata: %w", err)
+		}
+		if err := s.repo.UpsertImagePhashBands(ctx, tx, id, hash); err != nil {
+			return err
 		}
 	}
 

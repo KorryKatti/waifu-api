@@ -62,6 +62,7 @@ func TestSchemaMatchesEntityFrameworkModel(t *testing.T) {
 	// the EF snapshot, so an entry is caught once production really does have it.
 	goOnlyTables := map[string]string{
 		"InstanceIndex": "the instance index, added 2026-10-15. A new table rather than a change to an existing one, so EF Core cannot be affected: it reads the tables its model declares and never looks at this one. The row does not exist until something registers, and reads treat its absence as an empty index, so nothing has to seed it. APPLY THIS TABLE TO PRODUCTION before deploying code that reads it.",
+		"ImagePhashBands": "perceptual-hash band index for near-duplicate detection, added 2026-11-10. A Go-only helper table keyed to Images.Id so duplicate checks can use indexed candidate lookup instead of a full Images scan; it does not alter any C#-owned table. Backfill existing rows and APPLY THIS TABLE TO PRODUCTION for the indexed path to take effect at scale.",
 	}
 
 	for table, reason := range goOnlyTables {

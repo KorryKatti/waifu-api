@@ -5,10 +5,10 @@ import { Plus, Minus, Clock } from 'lucide-react';
 export type TagChipTone = 'neutral' | 'pending' | 'add' | 'remove';
 
 const TONES: Record<TagChipTone, { cls: string; icon?: ReactNode }> = {
-    neutral: { cls: 'bg-secondary text-foreground' },
-    pending: { cls: 'bg-amber-500/10 text-amber-600 border border-dashed border-amber-500/40', icon: <Clock size={11} className="shrink-0" /> },
-    add: { cls: 'bg-green-500/10 text-green-600', icon: <Plus size={12} className="shrink-0" /> },
-    remove: { cls: 'bg-destructive/10 text-destructive', icon: <Minus size={12} className="shrink-0" /> },
+    neutral: { cls: 'bg-transparent booru-link' },
+    pending: { cls: 'bg-amber-500/10 text-amber-600 border border-dashed border-amber-500/40 px-1 rounded-sm', icon: <Clock size={11} className="shrink-0" /> },
+    add: { cls: 'bg-green-500/10 text-green-700 dark:text-green-400 px-1 rounded-sm', icon: <Plus size={12} className="shrink-0" /> },
+    remove: { cls: 'bg-destructive/10 text-destructive px-1 rounded-sm', icon: <Minus size={12} className="shrink-0" /> },
 };
 
 interface TagChipProps {
@@ -31,11 +31,11 @@ interface TagChipProps {
 export const TagChip = ({ label, tone = 'neutral', href, icon, trailingIcon, title }: TagChipProps) => {
     const t = TONES[tone];
     const lead = icon !== undefined ? icon : t.icon;
-    const base = `inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${t.cls}`;
+    const base = `inline-flex items-center gap-1 py-0.5 text-xs ${t.cls} ${tone === 'neutral' ? '' : ''}`;
     const inner = <>{lead}{label}{trailingIcon}</>;
     return href
-        ? <Link to={href} title={title} className={`${base} hover:underline hover:brightness-110 transition`}>{inner}</Link>
-        : <span title={title} className={base}>{inner}</span>;
+        ? <Link to={href} title={title} className={`${base} hover:underline`}>{inner}</Link>
+        : <span title={title} className={`${base} ${tone === 'neutral' ? 'text-foreground' : ''}`}>{inner}</span>;
 };
 
 export default TagChip;

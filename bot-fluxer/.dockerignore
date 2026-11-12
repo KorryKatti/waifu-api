@@ -1,0 +1,12 @@
+# Secrets must never enter the build context or image.
+.env
+
+# Local build output and state.
+bot-fluxer
+register_log.json
+instance_ping_log.json
+
+.git
+.gitignore
+Dockerfile
+docker-compose.yml

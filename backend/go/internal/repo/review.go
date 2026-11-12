@@ -90,6 +90,10 @@ func (r *Repo) CreateImage(ctx context.Context, tx Tx, input CreateImageInput) (
 		}
 	}
 
+	if err := r.UpsertImagePhashBands(ctx, tx, image.ID, input.PerceptualHash); err != nil {
+		return models.Image{}, err
+	}
+
 	return image, nil
 }
 

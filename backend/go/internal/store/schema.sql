@@ -219,6 +219,23 @@ CREATE TABLE IF NOT EXISTS "InstanceIndex" (
     CONSTRAINT "CK_InstanceIndex_Singleton" CHECK ("Id" = 1)
 );
 
+-- Near-duplicate lookup helper for Images.PerceptualHash.
+--
+-- Go-only table: stores fixed-width bands of the 64-bit perceptual hash so
+-- duplicate detection can fetch a small indexed candidate set (pigeonhole
+-- guarantee for Hamming distance <= 4) instead of scanning all Images. EF Core
+-- does not know about it and no existing C#-owned table is modified.
+-- APPLY THIS TABLE (and backfill) TO PRODUCTION before relying on the indexed
+-- lookup on large datasets.
+CREATE TABLE IF NOT EXISTS "ImagePhashBands" (
+    "ImageId" bigint NOT NULL PRIMARY KEY REFERENCES "Images"("Id") ON DELETE CASCADE,
+    "Band1"   integer NOT NULL,
+    "Band2"   integer NOT NULL,
+    "Band3"   integer NOT NULL,
+    "Band4"   integer NOT NULL,
+    "Band5"   integer NOT NULL
+);
+
 -- ---------------------------------------------------------------------------
 -- Indexes matching the query patterns the API relies on.
 -- ---------------------------------------------------------------------------
@@ -239,6 +256,12 @@ CREATE INDEX IF NOT EXISTS "IX_ReviewTask_SubmitterId" ON "ReviewTasks" ("Submit
 CREATE INDEX IF NOT EXISTS "IX_ApiKey_KeyHash" ON "ApiKeys" ("KeyHash");
 CREATE INDEX IF NOT EXISTS "IX_Report_Status_CreatedAt"
     ON "Reports" ("Status", "CreatedAt" DESC);
+
+CREATE INDEX IF NOT EXISTS "IX_ImagePhashBands_Band1" ON "ImagePhashBands" ("Band1");
+CREATE INDEX IF NOT EXISTS "IX_ImagePhashBands_Band2" ON "ImagePhashBands" ("Band2");
+CREATE INDEX IF NOT EXISTS "IX_ImagePhashBands_Band3" ON "ImagePhashBands" ("Band3");
+CREATE INDEX IF NOT EXISTS "IX_ImagePhashBands_Band4" ON "ImagePhashBands" ("Band4");
+CREATE INDEX IF NOT EXISTS "IX_ImagePhashBands_Band5" ON "ImagePhashBands" ("Band5");
 -- ---------------------------------------------------------------------------
 -- Column defaults
 --

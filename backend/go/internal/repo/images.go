@@ -507,22 +507,19 @@ func (r *Repo) GetImageByID(ctx context.Context, id int64, includePending bool) 
 // than only accepted ones, matching the C# service, so a pending image still
 // blocks a re-upload of the same file.
 func (r *Repo) FindDuplicateByHash(ctx context.Context, hash uint64) (int64, error) {
-	// The comparison is done in SQL on the bit string. Casting both sides to
-	// bit(64) keeps the operator available.
-	//
-	// The Hamming distance is computed in SQL because doing it in Go would mean
-	// loading every stored hash on every upload.
-	//
-	// Postgres has no hamming-distance function for bit(n). The XOR operator
-	// "#" on bit types produces the differing bits, and counting the ones in the
-	// result is the distance. replace() strips the zeros, so length() counts the
-	// ones. Both parameters are explicitly cast, because pgx cannot infer a type
-	// for a parameter used only inside a bit expression and would otherwise fail
-	// to encode the threshold.
-	//
-	// NOTE: this only produces meaningful results once the corpus backfill has
-	// run. Until then the stored hashes come from an algorithm that does not
-	// reproduce itself, so the comparison is against a mixed vocabulary.
+	id, err := r.findDuplicateByHashBands(ctx, hash)
+	if err == nil {
+		return id, nil
+	}
+	// If the band helper table is not present yet (rollout/backward compat),
+	// fall back to the legacy full scan so uploads remain correct.
+	if isUndefinedTable(err, "ImagePhashBands") {
+		return r.findDuplicateByHashScan(ctx, hash)
+	}
+	return 0, err
+}
+
+func (r *Repo) findDuplicateByHashScan(ctx context.Context, hash uint64) (int64, error) {
 	const query = `
         SELECT "Id"
         FROM "Images"
@@ -536,13 +533,64 @@ func (r *Repo) FindDuplicateByHash(ctx context.Context, hash uint64) (int64, err
 	var id int64
 	err := r.db.QueryRow(ctx, query, models.PerceptualHashToBitString(hash), models.DuplicateThreshold).Scan(&id)
 	if err != nil {
-		// No rows is the normal "no duplicate" outcome.
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("find duplicate: %w", err)
 	}
 	return id, nil
+}
+
+func (r *Repo) findDuplicateByHashBands(ctx context.Context, hash uint64) (int64, error) {
+	b1, b2, b3, b4, b5 := models.PhashBands(hash)
+	const query = `
+        WITH band_candidates AS (
+            SELECT "ImageId" AS id
+            FROM "ImagePhashBands"
+            WHERE "Band1" = $2 OR "Band2" = $3 OR "Band3" = $4 OR "Band4" = $5 OR "Band5" = $6
+        ), unbanded AS (
+            SELECT "Id" AS id
+            FROM "Images" i
+            WHERE NOT EXISTS (SELECT 1 FROM "ImagePhashBands" b WHERE b."ImageId" = i."Id")
+        ), candidates AS (
+            SELECT id FROM band_candidates
+            UNION
+            SELECT id FROM unbanded
+        )
+        SELECT i."Id"
+        FROM "Images" i
+        JOIN candidates c ON c.id = i."Id"
+        WHERE length(replace(
+                  ("PerceptualHash"::bit(64) # $1::bit(64))::text,
+                  '0', ''
+              ))::int <= $7::int
+        ORDER BY i."Id"
+        LIMIT 1`
+
+	var id int64
+	err := r.db.QueryRow(ctx, query,
+		models.PerceptualHashToBitString(hash),
+		b1, b2, b3, b4, b5,
+		models.DuplicateThreshold,
+	).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("find duplicate: %w", err)
+	}
+	return id, nil
+}
+
+func isUndefinedTable(err error, table string) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		// 42P01 = undefined_table
+		if pgErr.Code == "42P01" && (table == "" || strings.Contains(pgErr.Message, table) || strings.Contains(pgErr.TableName, table)) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeleteImage removes an image row.
@@ -553,6 +601,30 @@ func (r *Repo) DeleteImage(ctx context.Context, id int64) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM "Images" WHERE "Id" = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete image: %w", err)
+	}
+	return nil
+}
+
+// UpsertImagePhashBands stores the band index for an image's perceptual hash.
+// It is best-effort with respect to rollout: if the helper table does not
+// exist yet, the write is ignored and duplicate checks fall back to a scan.
+func (r *Repo) UpsertImagePhashBands(ctx context.Context, tx Tx, imageID int64, hash uint64) error {
+	b1, b2, b3, b4, b5 := models.PhashBands(hash)
+	_, err := tx.Exec(ctx, `
+        INSERT INTO "ImagePhashBands" ("ImageId", "Band1", "Band2", "Band3", "Band4", "Band5")
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT ("ImageId") DO UPDATE
+        SET "Band1" = EXCLUDED."Band1",
+            "Band2" = EXCLUDED."Band2",
+            "Band3" = EXCLUDED."Band3",
+            "Band4" = EXCLUDED."Band4",
+            "Band5" = EXCLUDED."Band5"`,
+		imageID, b1, b2, b3, b4, b5)
+	if err != nil {
+		if isUndefinedTable(err, "ImagePhashBands") {
+			return nil
+		}
+		return fmt.Errorf("upsert image phash bands: %w", err)
 	}
 	return nil
 }

@@ -1,12 +1,13 @@
 ﻿import { getEnv } from '../utils/env';
-import { Mail, MessageSquare } from 'lucide-react';
+import { Mail, MessageSquare, MessagesSquare } from 'lucide-react';
 import { MetaTags } from '../hooks/useMetaTags';
 
 const Contact = () => {
     const contactEmail = getEnv('VITE_CONTACT_EMAIL');
     const discordServerUrl = getEnv('VITE_DISCORD_SERVER_URL');
+    const fluxerServerUrl = getEnv('VITE_FLUXER_SERVER_URL');
 
-    if (!contactEmail && !discordServerUrl) {
+    if (!contactEmail && !discordServerUrl && !fluxerServerUrl) {
         return (
             <div className="flex flex-col items-center justify-center min-h-[60vh] p-4 text-center">
                 <h1 className="text-2xl font-bold mb-2">Contact Information Unavailable</h1>
@@ -30,7 +31,7 @@ const Contact = () => {
                 </p>
             </div>
 
-            <div className="grid md:grid-cols-2 gap-6 max-w-2xl mx-auto">
+            <div className="grid md:grid-cols-3 gap-6 max-w-4xl mx-auto">
                 {contactEmail && (
                     <a 
                         href={`mailto:${contactEmail}`}
@@ -64,6 +65,26 @@ const Contact = () => {
                             Join our community server for real-time support and discussions.
                         </p>
                         <span className="text-[#5865F2] font-medium group-hover:underline">
+                            Join Server
+                        </span>
+                    </a>
+                )}
+
+                {fluxerServerUrl && (
+                    <a
+                        href={fluxerServerUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="group flex flex-col items-center p-8 bg-card border border-border rounded-2xl hover:border-primary/50 hover:shadow-lg hover:shadow-primary/5 transition-all duration-300"
+                    >
+                        <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mb-6 group-hover:scale-110 transition-transform duration-300">
+                            <MessagesSquare size={32} className="text-primary" />
+                        </div>
+                        <h2 className="text-xl font-bold mb-2">Fluxer Community</h2>
+                        <p className="text-muted-foreground text-center mb-4">
+                            Join our community server for real-time support and discussions.
+                        </p>
+                        <span className="text-primary font-medium group-hover:underline">
                             Join Server
                         </span>
                     </a>

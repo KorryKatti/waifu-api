@@ -21,6 +21,8 @@ import Contact from './pages/Contact';
 import SiteBannerSettings from './pages/SiteBannerSettings';
 import NotFound from './pages/NotFound';
 import Instances from './pages/Instances';
+import Router from './pages/Router';
+import Legal from './pages/Legal';
 
 function App() {
     return (
@@ -47,6 +49,8 @@ function App() {
                 <Route path="site-banner" element={<SiteBannerSettings />} />
                 <Route path="contact" element={<Contact />} />
                 <Route path="instances" element={<Instances />} />
+                <Route path="router" element={<Router />} />
+                <Route path="legal" element={<Legal />} />
                 <Route path="auth/callback" element={<Callback />} />
                 <Route path="*" element={<NotFound />} />
             </Route>

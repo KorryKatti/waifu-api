@@ -303,16 +303,23 @@ const FilterSidebar = ({ searchParams, setSearchParams, showFilters, setShowFilt
     return (
         <aside
             className={`
-                fixed inset-y-0 right-0 z-[60] bg-card border-l border-border shadow-2xl h-full flex flex-col
-                transition-all duration-300 ease-in-out
+                fixed inset-y-0 left-0 z-[60] bg-card border-r border-border h-full flex flex-col
+                transition-all duration-200 ease-in-out
                 ${showFilters
-                ? 'translate-x-0 w-full md:w-80 md:translate-x-0'
-                : 'translate-x-full md:translate-x-0 md:w-0 md:border-l-0 md:overflow-hidden'
+                ? 'translate-x-0 w-[85vw] max-w-xs md:w-64 md:max-w-none md:translate-x-0'
+                : '-translate-x-full md:translate-x-0 md:w-0 md:border-r-0 md:overflow-hidden'
             }
-                md:relative md:z-40 md:shadow-none
+                md:sticky md:top-[calc(3rem+2rem)] md:h-[calc(100vh-5rem)] md:z-30 md:shrink-0
             `}
         >
-            <div className="flex-1 p-5 overflow-y-auto space-y-6 w-full md:w-80 min-w-[20rem] scrollbar-thin pt-10 md:pt-6">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-secondary/30 md:hidden">
+                <span className="font-bold text-sm">Search & Filters</span>
+                <button onClick={() => setShowFilters(false)} className="p-1 rounded hover:bg-secondary"><X size={18} /></button>
+            </div>
+            <div className="flex-1 p-3 overflow-y-auto space-y-4 w-full md:w-64 text-sm">
+                <div className="pb-1 border-b border-border">
+                    <h2 className="font-bold text-sm">Search</h2>
+                </div>
                 <SearchableSelect
                     label="Sort By"
                     options={sortOptions}
@@ -324,7 +331,7 @@ const FilterSidebar = ({ searchParams, setSearchParams, showFilters, setShowFilt
                 />
 
                 <SearchableSelect
-                    label="Content Rating"
+                    label="Rating"
                     options={ratingOptions}
                     selectedOptions={ratingOptions.filter(o => o.id === isNsfw)}
                     onSelect={(o) => updateFilter('isNsfw', o.id as string)}
@@ -499,8 +506,8 @@ const FilterSidebar = ({ searchParams, setSearchParams, showFilters, setShowFilt
                 </div>
             </div>
 
-            <div className="p-4 border-t border-border md:hidden bg-card">
-                <button onClick={() => setShowFilters(false)} className="w-full py-3 bg-primary text-primary-foreground rounded-xl font-bold">Done</button>
+            <div className="p-2 border-t border-border md:hidden bg-card">
+                <button onClick={() => setShowFilters(false)} className="w-full py-2 bg-primary text-primary-foreground rounded-sm font-semibold text-sm">Apply</button>
             </div>
         </aside>
     );

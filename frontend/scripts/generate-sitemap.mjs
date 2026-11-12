@@ -37,6 +37,7 @@ const STATIC_ROUTES = [
   { loc: '/tags', priority: '0.6', changefreq: 'weekly' },
   { loc: '/artists', priority: '0.6', changefreq: 'weekly' },
   { loc: '/contact', priority: '0.3', changefreq: 'yearly' },
+  { loc: '/legal', priority: '0.2', changefreq: 'yearly' },
 ]
 
 function stripTrailingSlash(value) {

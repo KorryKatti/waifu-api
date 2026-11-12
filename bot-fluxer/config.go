@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,12 +13,14 @@ import (
 
 const (
 	defaultAPIBase    = "https://waifu-cdn.waifu-api.workers.dev"
-	defaultPrefix     = "!"
+	defaultPrefix     = "w!"
 	defaultAPITimeout = 30 * time.Second
 	longReadTimeout   = 90 * time.Second
 	registerTimeout   = 60 * time.Second
 	instanceTimeout   = 3 * time.Second
 	statsRefreshEvery = 30 * time.Minute
+	// The only guild `w!register` works in, unless REGISTER_GUILDS overrides it.
+	defaultRegisterGuildID = "1563189593090568192"
 )
 
 type config struct {
@@ -25,6 +28,7 @@ type config struct {
 	prefix               string
 	apiBase              string
 	registerBase         string
+	registerGuilds       map[string]bool
 	nsfwChannels         map[string]bool
 	adminKey             string
 	operatorRole         string
@@ -43,6 +47,7 @@ func loadConfig() *config {
 		prefix:               env("PREFIX", defaultPrefix),
 		apiBase:              apiBase,
 		registerBase:         registerBase,
+		registerGuilds:       parseIDSet(env("REGISTER_GUILDS", defaultRegisterGuildID)),
 		nsfwChannels:         parseIDSet(os.Getenv("NSFW_CHANNELS")),
 		adminKey:             env("WAIFU_ADMIN_API_KEY", ""),
 		operatorRole:         env("INSTANCE_OPERATOR_ROLE", ""),
@@ -83,6 +88,34 @@ func parseIDSet(raw string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// registerGuildAllowed reports whether `w!register` may run in guildID.
+// DMs (empty guildID) are never allowed. An empty allowlist (e.g. a
+// config built by hand in a test) falls back to the default guild, so
+// the command stays gated by default.
+func (c *config) registerGuildAllowed(guildID string) bool {
+	if guildID == "" {
+		return false
+	}
+	if len(c.registerGuilds) == 0 {
+		return guildID == defaultRegisterGuildID
+	}
+	return c.registerGuilds[guildID]
+}
+
+// registerGuildList returns the guild IDs `w!register` is enabled in,
+// sorted, for use in the refusal message.
+func (c *config) registerGuildList() []string {
+	if len(c.registerGuilds) == 0 {
+		return []string{defaultRegisterGuildID}
+	}
+	ids := make([]string, 0, len(c.registerGuilds))
+	for id := range c.registerGuilds {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func registerTargetIsCDN(target string) bool {

@@ -102,6 +102,19 @@ func recordAttempt(data *cooldownLog, m *gofluxer.Message, outcome, rawURL, name
 }
 
 func (a *botApp) cmdRegister(m *message, args string) {
+	// `w!register` is only enabled in the configured guild(s) — everywhere
+	// else (other guilds and DMs) it is disabled, and the user is told so.
+	if !a.cfg.registerGuildAllowed(m.GuildID) {
+		allowed := make([]string, 0)
+		for _, id := range a.cfg.registerGuildList() {
+			allowed = append(allowed, "`"+id+"`")
+		}
+		a.reply(m, fmt.Sprintf(
+			"`%sregister` is disabled here — it only works in guild %s. Please run it there.",
+			a.cfg.prefix, strings.Join(allowed, ", "),
+		))
+		return
+	}
 	if a.cfg.adminKey == "" {
 		a.reply(m, "This bot is not configured to register instances. Set `WAIFU_ADMIN_API_KEY` on it and try again.")
 		return
