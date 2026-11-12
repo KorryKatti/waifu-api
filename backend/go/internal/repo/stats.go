@@ -103,27 +103,56 @@ func (r *Repo) RecordUserRequest(ctx context.Context, userID int64, kinds UserRe
 //
 // Retention is bounded rather than open-ended: the admin dashboard only charts
 // the last 30 days, so keeping years of rows costs storage and buys nothing.
-// A cutoff of zero or less keeps everything.
+// Work is capped per call to smooth resource usage on a small instance.
 func (r *Repo) DeleteDailyStatsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
-	tag, err := r.db.Exec(ctx,
-		`DELETE FROM "DailyStats" WHERE "Date" < $1`, cutoff.UTC().Format("2006-01-02"))
-	if err != nil {
-		return 0, fmt.Errorf("delete daily stats: %w", err)
+	const batchSize = 1000
+	const maxBatchesPerRun = 10
+	var total int64
+	for i := 0; i < maxBatchesPerRun; i++ {
+		tag, err := r.db.Exec(ctx, `
+        DELETE FROM "DailyStats"
+        WHERE ctid IN (
+            SELECT ctid FROM "DailyStats"
+            WHERE "Date" < $1
+            LIMIT $2
+        )`, cutoff.UTC().Format("2006-01-02"), batchSize)
+		if err != nil {
+			return total, fmt.Errorf("delete daily stats: %w", err)
+		}
+		n := tag.RowsAffected()
+		total += n
+		if n < batchSize {
+			return total, nil
+		}
 	}
-	return tag.RowsAffected(), nil
+	return total, nil
 }
 
 // DeleteResolvedTasksBefore prunes the review queue's audit history.
 //
 // Only resolved tasks are eligible: a pending task is live work, and deleting
-// one would lose a submission nobody has looked at yet.
+// one would lose a submission nobody has looked at yet. Work is capped per
+// batch and per run to smooth resource usage on a small instance.
 func (r *Repo) DeleteResolvedTasksBefore(ctx context.Context, cutoff time.Time) (int64, error) {
-	tag, err := r.db.Exec(ctx, `
+	const batchSize = 1000
+	const maxBatchesPerRun = 10
+	var total int64
+	for i := 0; i < maxBatchesPerRun; i++ {
+		tag, err := r.db.Exec(ctx, `
         DELETE FROM "ReviewTasks"
-        WHERE "Status" <> $1 AND "ResolvedAt" < $2`,
-		int(models.TaskPending), cutoff.UTC())
-	if err != nil {
-		return 0, fmt.Errorf("delete resolved tasks: %w", err)
+        WHERE ctid IN (
+            SELECT ctid FROM "ReviewTasks"
+            WHERE "Status" <> $1 AND "ResolvedAt" < $2
+            LIMIT $3
+        )`, int(models.TaskPending), cutoff.UTC(), batchSize)
+		if err != nil {
+			return total, fmt.Errorf("delete resolved tasks: %w", err)
+		}
+		n := tag.RowsAffected()
+		total += n
+		if n < batchSize {
+			return total, nil
+		}
 	}
-	return tag.RowsAffected(), nil
+	return total, nil
 }
