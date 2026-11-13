@@ -105,10 +105,16 @@ const CACHE_VERSION = "v2";
 // Only the path and query are preserved; the origin is included so two
 // deployments sharing a Worker never collide. The version prefix is what makes
 // the whole store discardable.
+//
+// Query parameters are normalized (sorted, stable) so semantically identical
+// anonymous reads do not fragment the edge cache.
 function cacheKeyFor(request) {
   const url = new URL(request.url);
+  const params = new URLSearchParams(url.search);
+  params.sort();
+  const search = params.toString();
   return new Request(
-    `${url.origin}${CACHE_VERSION}/cache${url.pathname}${url.search}`,
+    `${url.origin}${CACHE_VERSION}/cache${url.pathname}${search ? `?${search}` : ""}`,
     { method: request.method }
   );
 }

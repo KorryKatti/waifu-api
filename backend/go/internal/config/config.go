@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"waifuapi/internal/imageproc"
 )
@@ -138,6 +139,20 @@ type Config struct {
 
 	// MaxUploadSizeBytes is the largest accepted request body.
 	MaxUploadSizeBytes int64
+
+	// UploadConcurrency limits how many uploads may be processed concurrently
+	// (decode/convert/dedupe/store). Defaults to 1 to protect a single, weak
+	// backend instance from burst memory/CPU pressure.
+	UploadConcurrency int
+
+	// DatabasePool controls the Postgres connection pool.
+	DatabasePool DatabasePoolConfig
+
+	// HTTP holds server timeout settings.
+	HTTP HTTPConfig
+
+	// Background controls periodic maintenance scheduling.
+	Background BackgroundConfig
 
 	// Review controls the content moderation pipeline.
 	Review ReviewConfig
@@ -257,6 +272,39 @@ type S3Config struct {
 // CDNConfig describes how image URLs are built.
 type CDNConfig struct {
 	BaseURL string
+}
+
+// DatabasePoolConfig controls the Postgres connection pool.
+//
+// Defaults preserve the previous hardcoded behavior (8 connections, 1h lifetime,
+// 30m idle, 1m health checks).
+type DatabasePoolConfig struct {
+	// MaxConnections caps the pool. Defaults to 8.
+	MaxConnections int32
+	// MaxConnLifetime is the maximum lifetime of a connection. Defaults to 1h.
+	MaxConnLifetime time.Duration
+	// MaxConnIdleTime is the maximum idle time of a connection. Defaults to 30m.
+	MaxConnIdleTime time.Duration
+	// HealthCheckPeriod is the interval for health checks. Defaults to 1m.
+	HealthCheckPeriod time.Duration
+}
+
+// HTTPConfig controls HTTP server timeouts.
+//
+// Defaults preserve the previous hardcoded behavior.
+type HTTPConfig struct {
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+}
+
+// BackgroundConfig controls periodic maintenance scheduling.
+//
+// Defaults preserve the previous behavior (24h interval, 30s startup stagger).
+type BackgroundConfig struct {
+	Interval       time.Duration
+	StartupStagger time.Duration
 }
 
 // ImageConfig carries the upload validation limits.
@@ -501,6 +549,33 @@ func Load(l *Loader) (*Config, error) {
 	}
 	cfg.MaxUploadSizeBytes = int64(maxUploadMB) * 1024 * 1024
 
+	// Upload concurrency: bounded to protect a single, weak instance by default.
+	uploadConcurrency := l.optionalIntOrAccumulate("Image__UploadConcurrency", 1, &missing)
+	if uploadConcurrency <= 0 {
+		uploadConcurrency = 1
+	}
+	cfg.UploadConcurrency = uploadConcurrency
+
+	// Database pool: optional, defaults preserve previous hardcoded behavior.
+	dbMaxConns := l.optionalIntOrAccumulate("Database__MaxConnections", 8, &missing)
+	if dbMaxConns <= 0 {
+		dbMaxConns = 8
+	}
+	cfg.DatabasePool.MaxConnections = int32(dbMaxConns)
+	cfg.DatabasePool.MaxConnLifetime = l.optionalDurationOrAccumulate("Database__MaxConnLifetime", time.Hour, &missing)
+	cfg.DatabasePool.MaxConnIdleTime = l.optionalDurationOrAccumulate("Database__MaxConnIdleTime", 30*time.Minute, &missing)
+	cfg.DatabasePool.HealthCheckPeriod = l.optionalDurationOrAccumulate("Database__HealthCheckPeriod", time.Minute, &missing)
+
+	// HTTP server timeouts: optional, defaults preserve previous hardcoded behavior.
+	cfg.HTTP.ReadHeaderTimeout = l.optionalDurationOrAccumulate("HTTP__ReadHeaderTimeout", 10*time.Second, &missing)
+	cfg.HTTP.ReadTimeout = l.optionalDurationOrAccumulate("HTTP__ReadTimeout", 60*time.Second, &missing)
+	cfg.HTTP.WriteTimeout = l.optionalDurationOrAccumulate("HTTP__WriteTimeout", 60*time.Second, &missing)
+	cfg.HTTP.IdleTimeout = l.optionalDurationOrAccumulate("HTTP__IdleTimeout", 120*time.Second, &missing)
+
+	// Background maintenance scheduling.
+	cfg.Background.Interval = l.optionalDurationOrAccumulate("Background__CleanupInterval", 24*time.Hour, &missing)
+	cfg.Background.StartupStagger = l.optionalDurationOrAccumulate("Background__StartupStagger", 30*time.Second, &missing)
+
 	// Review switches. These are required because the C# service treats them
 	// as mandatory and fails to boot without them; keeping them required here
 	// means the two services agree about what a valid configuration is.
@@ -694,6 +769,25 @@ func (l *Loader) optionalIntOrAccumulate(key string, fallback int, missing *[]st
 	value, err := l.optionalInt(key, fallback)
 	if err != nil {
 		*missing = append(*missing, err.Error())
+		return fallback
+	}
+	return value
+}
+
+// optionalDurationOrAccumulate reads a duration with a fallback, recording an
+// error if the value is present but malformed. Accepted formats are Go duration
+// strings (e.g. "1h", "30m", "90s").
+func (l *Loader) optionalDurationOrAccumulate(key string, fallback time.Duration, missing *[]string) time.Duration {
+	raw := l.get(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		*missing = append(*missing, fmt.Sprintf("%s must be a duration, got %q", key, raw))
+		return fallback
+	}
+	if value <= 0 {
 		return fallback
 	}
 	return value

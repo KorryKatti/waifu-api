@@ -104,8 +104,11 @@ func run() error {
 	defer cancelStartup()
 
 	db, err := store.Open(startupCtx, store.Config{
-		URL:            cfg.DatabaseURL,
-		MaxConnections: 8,
+		URL:               cfg.DatabaseURL,
+		MaxConnections:    cfg.DatabasePool.MaxConnections,
+		MaxConnLifetime:   cfg.DatabasePool.MaxConnLifetime,
+		MaxConnIdleTime:   cfg.DatabasePool.MaxConnIdleTime,
+		HealthCheckPeriod: cfg.DatabasePool.HealthCheckPeriod,
 	})
 	if err != nil {
 		return fmt.Errorf("connect to database: %w", err)
@@ -201,18 +204,21 @@ func run() error {
 	// no longer in it, and it deletes nothing.
 	jobs = append(jobs, background.InstanceProbe(data, prober, backgroundLogger{log}))
 
-	background.Start(context.Background(), backgroundLogger{log}, jobs...)
+	background.Start(context.Background(), backgroundLogger{log}, background.Config{
+		Interval:       cfg.Background.Interval,
+		StartupStagger: cfg.Background.StartupStagger,
+	}, jobs...)
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
 		Handler: handler,
 
-		// Generous timeouts. They exist to shed genuinely stuck connections,
-		// not to cut off slow-but-progressing work.
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// Generous timeouts by default. They exist to shed genuinely stuck
+		// connections, not to cut off slow-but-progressing work.
+		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
+		ReadTimeout:       cfg.HTTP.ReadTimeout,
+		WriteTimeout:      cfg.HTTP.WriteTimeout,
+		IdleTimeout:       cfg.HTTP.IdleTimeout,
 	}
 
 	// ---- Serve ---------------------------------------------------------

@@ -70,7 +70,7 @@ func NewServer(cfg *config.Config, db *store.DB, data *repo.Repo, log Logger, fi
 		tokens:    tokens,
 		purger:    purger,
 		prober:    prober,
-		uploadSem: make(chan struct{}, 1),
+		uploadSem: make(chan struct{}, max(1, cfg.UploadConcurrency)),
 	}
 }
 
@@ -189,6 +189,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 			"provider":       string(s.cfg.S3.Provider),
 			"bucket":         s.cfg.S3.BucketName,
 			"forcePathStyle": s.cfg.S3.ForcePathStyle,
+		}
+		body["limits"] = map[string]any{
+			"uploadConcurrency": cap(s.uploadSem),
+			"maxUploadSizeBytes": s.cfg.MaxUploadSizeBytes,
+		}
+		if s.cfg.DatabasePool.MaxConnections > 0 {
+			body["databasePoolConfig"] = map[string]any{
+				"maxConnections":    s.cfg.DatabasePool.MaxConnections,
+				"maxConnLifetime":   s.cfg.DatabasePool.MaxConnLifetime.String(),
+				"maxConnIdleTime":   s.cfg.DatabasePool.MaxConnIdleTime.String(),
+				"healthCheckPeriod": s.cfg.DatabasePool.HealthCheckPeriod.String(),
+			}
 		}
 	}
 
