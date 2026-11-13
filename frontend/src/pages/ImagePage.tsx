@@ -20,6 +20,7 @@ import MoreLikeThis from '../components/MoreLikeThis';
 import NotFound from './NotFound';
 import { MetaTags } from '../hooks/useMetaTags';
 import { isBot } from '../utils/bot';
+import { imgCard } from '../utils/cfImage';
 
 const ImagePage = () => {
   const { id } = useParams<{ id: string }>();
@@ -154,6 +155,10 @@ const ImagePage = () => {
     `${image.width}x${image.height}`,
   ].filter(Boolean).join(' | ');
 
+  const saucenaoImageUrl = imgCard(image.url);
+  const saucenaoUrl = `https://saucenao.com/search.php?db=999&url=${encodeURIComponent(saucenaoImageUrl)}`;
+  const waifu2xUrl = `https://waifu2x.booru.pics/Home/fromlink?denoise=1&scale=2&url=${encodeURIComponent(image.url)}`;
+
   return (
     <div className="px-3 md:px-4 py-3">
       <MetaTags
@@ -223,6 +228,32 @@ const ImagePage = () => {
               )}
             </div>
           </div>
+
+          {image.url && (
+            <div className="booru-panel">
+              <div className="px-2 py-1.5 border-b border-border bg-secondary/30 font-bold text-sm">Tools</div>
+              <div className="p-2 flex flex-col gap-1.5 text-sm">
+                <a
+                  href={saucenaoUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="booru-link inline-flex items-center gap-1.5"
+                  title="Search image source on SauceNAO"
+                >
+                  <ExternalLink size={13} /> SauceNAO
+                </a>
+                <a
+                  href={waifu2xUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="booru-link inline-flex items-center gap-1.5"
+                  title="Upscale/denoise with Waifu2x"
+                >
+                  <ExternalLink size={13} /> Waifu2x
+                </a>
+              </div>
+            </div>
+          )}
 
           <div className="booru-panel">
             <div className="px-2 py-1.5 border-b border-border bg-secondary/30 font-bold text-sm">Artists</div>
