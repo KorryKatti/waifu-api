@@ -151,7 +151,7 @@ func TestRunJobRunsImmediatelyBeforeTicking(t *testing.T) {
 				runs <- struct{}{}
 				return nil
 			},
-		})
+		}, 0, 24*time.Hour)
 	}()
 
 	select {
@@ -194,7 +194,7 @@ func TestStartIsNonBlocking(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		Start(context.Background(), &recordingLog{}, Job{
+		Start(context.Background(), &recordingLog{}, Config{}, Job{
 			Name: "blocking-job",
 			Run: func(context.Context) error {
 				close(started)

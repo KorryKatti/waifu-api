@@ -23,6 +23,11 @@ tools/
 
 # Plans
 upgrade-plans.md
+optimization_plan.md
+
+# Local reference
+transcript.txt
+baseline/*stress-test*.md
 
 # Fluxer bot state
 bot-fluxer/register_log.json
